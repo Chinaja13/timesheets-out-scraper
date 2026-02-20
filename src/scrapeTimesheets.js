@@ -26,145 +26,128 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
     console.log("Saved HTML:", path);
   }
 
-  async function safeClick(locator, label, timeout = 15000) {
-    try {
-      if (await locator.count()) {
-        await locator.first().scrollIntoViewIfNeeded();
-        await locator.first().click({ timeout });
-        console.log("Clicked:", label);
-        return true;
+  async function waitForOverlayToClear(timeoutMs = 60000) {
+    // Overlay often shows "Loading..." in the middle
+    const overlay = page.locator("text=/Loading\\.\\.\\./i");
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      try {
+        if ((await overlay.count()) === 0) return;
+        const visible = await overlay.first().isVisible().catch(() => false);
+        if (!visible) return;
+      } catch {
+        return;
       }
-    } catch (e) {
-      console.log("Click failed:", label, String(e));
+      await page.waitForTimeout(500);
+    }
+    // Don't hard fail; just log and keep going
+    console.log("WARN: Loading overlay still visible after timeout");
+  }
+
+  function parseCounter(txt) {
+    const m = String(txt || "").match(/(\d+)\s*\/\s*(\d+)/);
+    if (!m) return null;
+    return { selected: Number(m[1]), total: Number(m[2]) };
+  }
+
+  async function readCounter() {
+    const counterLoc = page.locator(
+      "#app > div > div.menu-link.no-print.wide-counter-layout > span > div > span.float-right"
+    );
+    if ((await counterLoc.count()) === 0) return null;
+    const txt = await counterLoc.first().innerText().catch(() => "");
+    return parseCounter(txt);
+  }
+
+  async function waitForCounterNN(timeoutMs = 60000) {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const c = await readCounter();
+      if (c && c.total > 0 && c.selected === c.total) return c;
+      await page.waitForTimeout(500);
+    }
+    return await readCounter();
+  }
+
+  async function clickWithRetry(locator, label, attempts = 3, delayMs = 700) {
+    for (let i = 1; i <= attempts; i++) {
+      try {
+        await locator.first().scrollIntoViewIfNeeded();
+        await locator.first().click({ timeout: 15000 });
+        console.log(`Clicked: ${label} (attempt ${i})`);
+        return true;
+      } catch (e) {
+        console.log(`Click failed: ${label} (attempt ${i})`, String(e));
+        if (i < attempts) await page.waitForTimeout(delayMs);
+      }
     }
     return false;
   }
 
-  async function waitForAnyVisible(selectors, timeout = 30000) {
-    const loc = page.locator(selectors);
-    await loc.first().waitFor({ timeout, state: "visible" });
-    return loc;
+  async function ensureAllUsersSelected() {
+    // These are YOUR selectors (stable)
+    const peopleIcon = page.locator(
+      "#app > div > div.menu-link.no-print.wide-counter-layout > div > div.menu-link-container.icon > i"
+    );
+
+    const selectAllCheckmark = page.locator(
+      "#app > div > div.noPrint > div.slide-menu > nav > div.menu-links.menu-select-all > div.align-left > div > label > span.checkmark.cb-container-category.select-all"
+    );
+
+    const updateBtn = page.locator(
+      "#app > div > div.noPrint > div.slide-menu > nav > div.menu-links.top-bar > div.menu-link-item.update-menu-item.indent-1.tour-BTS-Update"
+    );
+
+    // Wait for page to be usable
+    await waitForOverlayToClear(60000);
+
+    const before = await readCounter();
+    console.log("Counter before:", before);
+
+    // If already N/N, we're good
+    if (before && before.total > 0 && before.selected === before.total) {
+      console.log("Already selected all users.");
+      return before;
+    }
+
+    // If 0/0, the UI isn't populated yet. Wait for it to become something real (0/39)
+    if (!before || (before.total === 0 && before.selected === 0)) {
+      console.log("Counter is 0/0 — waiting for it to populate...");
+      const populated = await waitForCounterToHaveTotal(60000);
+      console.log("Counter after populate wait:", populated);
+    }
+
+    // Open the slide-menu (people icon)
+    await clickWithRetry(peopleIcon, "People icon (open user picker)", 4, 900);
+    await page.waitForTimeout(800);
+
+    // Click Select All
+    await clickWithRetry(selectAllCheckmark, "Select All checkmark", 4, 900);
+
+    // Click Update
+    await clickWithRetry(updateBtn, "Update button", 4, 900);
+
+    // After update, there is often a loading overlay and the counter updates
+    await waitForOverlayToClear(90000);
+
+    const after = await waitForCounterNN(90000);
+    console.log("Counter after:", after);
+
+    return after;
   }
 
-  function reCounterText(txt) {
-    // matches "0 / 39" or "39/39"
-    const m = String(txt || "").match(/(\d+)\s*\/\s*(\d+)/);
-    if (!m) return null;
-    return { a: Number(m[1]), b: Number(m[2]) };
-  }
-
-  async function readSelectedCounter() {
-    // The counter appears top-right in schedules view.
-    // We’ll search for a small "x / y" text on the page and pick the one with the biggest total.
-    const candidates = await page.locator("text=/\\d+\\s*\\/\\s*\\d+/").allTextContents();
-    let best = null;
-    for (const t of candidates) {
-      const c = reCounterText(t);
-      if (!c) continue;
-      if (!best || c.b > best.b) best = c;
-    }
-    return best; // {a,b} or null
-  }
-
-  async function openUserPickerAndSelectAll() {
-    // We’re trying to get from 0/39 -> 39/39
-
-    // 1) Try clicking an icon near the counter (common patterns: fa-users, fa-user-group, etc.)
-    // We’ll just click the most likely “people” icon variants on the page (schedules header area).
-    const iconCandidates = [
-      "i.fa-users",
-      "i[class*='fa-users']",
-      "i.fa-user-group",
-      "i[class*='user-group']",
-      "i[class*='users']",
-      "i[class*='people']",
-      "i[class*='group']",
-      // also sometimes it’s an svg or button:
-      "button:has(i[class*='users'])",
-      "button:has(i[class*='group'])",
-      "a:has(i[class*='users'])",
-      "a:has(i[class*='group'])",
-      // worst-case: click the counter itself
-      "text=/\\d+\\s*\\/\\s*\\d+/"
-    ];
-
-    let opened = false;
-    for (const sel of iconCandidates) {
-      const ok = await safeClick(page.locator(sel), `open-user-picker via ${sel}`, 8000);
-      if (ok) {
-        opened = true;
-        await page.waitForTimeout(600);
-        break;
-      }
-    }
-
-    await snap(opened ? "04a-after-open-user-picker" : "04a-user-picker-not-opened");
-    await dumpHtml(opened ? "04a-after-open-user-picker" : "04a-user-picker-not-opened");
-
-    // 2) Try "Select All"
-    // Your other UI had a span.checkmark with select-all class.
-    // This UI might have a checkbox label, menu item, or button.
-    const selectAllCandidates = [
-      "text=/select\\s*all/i",
-      "label:has-text('Select All')",
-      "span.cb-container-category.select-all",
-      "span.checkmark.cb-container-category.select-all",
-      "input[type='checkbox'] >> nth=0"
-    ];
-
-    let selected = false;
-    for (const sel of selectAllCandidates) {
-      const ok = await safeClick(page.locator(sel), `select-all via ${sel}`, 8000);
-      if (ok) {
-        selected = true;
-        await page.waitForTimeout(400);
-        break;
-      }
-    }
-
-    // 3) Click "Update"
-    const updateCandidates = [
-      "text=/\\bupdate\\b/i",
-      "button:has-text('Update')",
-      "div:has-text('Update')"
-    ];
-
-    let updated = false;
-    for (const sel of updateCandidates) {
-      const ok = await safeClick(page.locator(sel), `update via ${sel}`, 8000);
-      if (ok) {
-        updated = true;
-        // allow any loading/progress
-        await page.waitForLoadState("networkidle").catch(() => {});
-        await page.waitForTimeout(1200);
-        break;
-      }
-    }
-
-    await snap("04b-after-selectall-update");
-    await dumpHtml("04b-after-selectall-update");
-
-    // 4) Wait for counter to reflect selection (not 0/x)
-    // We’ll poll up to 30s.
+  async function waitForCounterToHaveTotal(timeoutMs = 60000) {
     const start = Date.now();
-    while (Date.now() - start < 30000) {
-      const c = await readSelectedCounter();
-      if (c && c.b >= 10 && c.a > 0) {
-        console.log("Counter now:", c);
-        return { opened, selected, updated, counter: c };
-      }
-      await page.waitForTimeout(1000);
+    while (Date.now() - start < timeoutMs) {
+      const c = await readCounter();
+      if (c && c.total > 0) return c;
+      await page.waitForTimeout(500);
     }
-
-    const cFinal = await readSelectedCounter();
-    console.log("Counter final:", cFinal);
-    return { opened, selected, updated, counter: cFinal };
+    return await readCounter();
   }
 
   try {
-    // -----------------------
     // 1) Login
-    // -----------------------
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
     await snap("01-login-page");
 
@@ -172,64 +155,47 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
     await page.locator("#password, input[name='password']").first().fill(String(password || "").trim());
 
     await Promise.all([
-      page.waitForLoadState("networkidle"),
+      page.waitForLoadState("domcontentloaded"),
       page.locator("button.loginButton:has-text('Login'), button:has-text('Login')").first().click(),
     ]);
+
+    // Let redirects / app boot happen
+    await page.waitForLoadState("networkidle").catch(() => {});
+    await waitForOverlayToClear(60000);
 
     await snap("02-after-login");
     await dumpHtml("02-after-login");
 
-    // If login failed, bail early with readable message
-    const loginFailed = page.locator("text=/login failed|invalid credentials/i");
-    if (await loginFailed.count()) {
-      throw new Error("Login failed (invalid credentials shown on page). Check TS_USERNAME/TS_PASSWORD secrets.");
-    }
-
-    // -----------------------
-    // 2) Go to Schedules
-    // -----------------------
+    // 2) Go to Schedules directly
     await page.goto(SCHEDULES_URL, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(1200);
-
-    // Wait for the Calendars & Schedules header OR any schedule grid element
-    await waitForAnyVisible("text=/Calendars\\s*&\\s*Schedules/i, text=/Schedules/i, .tsWeek, .print-wrapper, table", 30000);
+    await page.waitForLoadState("networkidle").catch(() => {});
+    await waitForOverlayToClear(90000);
 
     await snap("03-schedules-loaded");
     await dumpHtml("03-schedules-loaded");
 
-    // -----------------------
-    // 3) Make sure users are selected (0/39 -> 39/39)
-    // -----------------------
-    const before = await readSelectedCounter();
-    console.log("Counter before:", before);
+    // 3) Ensure all users selected (wait for 39/39)
+    const counter = await ensureAllUsersSelected();
+    await snap("04-after-update");
+    await dumpHtml("04-after-update");
 
-    // If we detect 0/xx, try to open picker and select all
-    if (before && before.b >= 10 && before.a === 0) {
-      console.log("Detected 0 selected; attempting Select All + Update...");
-      const res = await openUserPickerAndSelectAll();
-      console.log("SelectAll/Update result:", res);
-    } else {
-      console.log("Counter does not look like 0/xx; skipping Select All step.");
+    if (!counter || !counter.total || counter.selected !== counter.total) {
+      console.log("WARN: Did not reach N/N selection. Counter=", counter);
+      // continue anyway; maybe still loads enough to scrape
     }
 
-    // -----------------------
-    // 4) Force Week view (if tab exists)
-    // -----------------------
+    // 4) Go to Week view
     const weekTab = page.locator("a.tab-week:has-text('Week'), a.tab.tab-week, button:has-text('Week')");
     if (await weekTab.count()) {
-      await weekTab.first().click({ timeout: 15000 });
-      await page.waitForTimeout(1200);
-      await snap("05-week-view");
-      await dumpHtml("05-week-view");
-    } else {
-      console.log("WARN: Week tab not found. Continuing with current view.");
-      await snap("05-week-tab-not-found");
-      await dumpHtml("05-week-tab-not-found");
+      await clickWithRetry(weekTab, "Week tab", 3, 900);
+      await page.waitForLoadState("networkidle").catch(() => {});
+      await waitForOverlayToClear(90000);
     }
 
-    // -----------------------
-    // 5) Scrape day cells (same logic as before)
-    // -----------------------
+    await snap("05-week-view");
+    await dumpHtml("05-week-view");
+
+    // 5) Scrape (kept simple; your formatters handle filtering support)
     const result = await page.evaluate(({ dateYmd }) => {
       const norm = (s) => String(s || "").replace(/\s+/g, " ").trim();
       const lower = (s) => norm(s).toLowerCase();
@@ -244,9 +210,9 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
         return `${y}-${m}-${day}`;
       }
 
-      // Try multiple header patterns (your UI varies)
+      // Headers (works with both old/new schedule table variants)
       const headerEls = Array.from(document.querySelectorAll(
-        ".grid-day-header .date_label, .grid-day-header.master-grid-cell .date_label, th, .tsWeek th"
+        ".grid-day-header .date_label, .grid-day-header.master-grid-cell .date_label, thead th, .tsWeek th, .table ts-schedule-table-header th"
       ));
 
       const headers = headerEls
@@ -255,25 +221,15 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
           const ymd = parseHeaderDateToYmd(text);
           return { idx, text, ymd };
         })
-        .filter(h => h.text && (h.ymd || /feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|jan/i.test(h.text)));
+        .filter(h => h.text);
 
-      const target = headers.find((h) => h.ymd === dateYmd);
-      const targetIdx = target ? target.idx : null;
-
-      // Row names: in your screenshot it’s a left column with names (not .name-ellipses in this view)
-      const rowNameCells = Array.from(document.querySelectorAll("td:first-child, .name-ellipses"));
-      const debug = {
-        headers: headers.slice(0, 20),
-        targetIdx,
-        rowNameCount: rowNameCells.length,
-        sampleRowName: rowNameCells[0] ? norm(rowNameCells[0].textContent) : ""
-      };
+      const targetHeader = headers.find(h => h.ymd === dateYmd) || null;
 
       function parseHoursAndType(text) {
         const t = lower(text);
         const isSick = t.includes("sick");
-        const isVac = t.includes("vac");
         const isPto = t.includes("pto") || t.includes("paid time off");
+        const isVac = t.includes("vac");
         const isHol = t.includes("holiday");
 
         let type = "Out";
@@ -282,24 +238,21 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
         else if (isVac) type = "Vacation";
         else if (isHol) type = "Holiday";
 
-        const nums = Array.from(t.matchAll(/(\d+(?:\.\d+)?)/g)).map((m) => Number(m[1])).filter(n => !Number.isNaN(n));
-        let hours = 0;
-        if (nums.length) {
-          // In your cells it’s like "8.00 PTO"
-          hours = Math.max(...nums);
-        }
+        const nums = Array.from(t.matchAll(/(\d+(?:\.\d+)?)/g)).map(m => Number(m[1])).filter(n => !Number.isNaN(n));
+        let hours = nums.length ? Math.max(...nums) : 0;
 
-        const looksLikeOut = isPto || isSick || isVac || isHol || t.includes("out") || t.includes("leave") || t.includes("off");
-        if (looksLikeOut && hours === 0) hours = 8;
+        const looksOut = isPto || isSick || isVac || isHol || t.includes("time off") || t.includes("unavailable");
+        if (looksOut && hours === 0) hours = 8;
 
-        return { looksLikeOut, hours, type };
+        return { looksOut, hours, type };
       }
 
-      // Attempt to read the schedule grid from table rows if present
-      const table = document.querySelector("table") || document.querySelector(".tsWeek") || document.body;
-      const trs = Array.from(table.querySelectorAll("tr"));
-
       const out = [];
+
+      // Strategy A: schedule grid table rows
+      const tables = Array.from(document.querySelectorAll("table"));
+      const table = tables.length ? tables[0] : null;
+      const trs = table ? Array.from(table.querySelectorAll("tr")) : [];
 
       for (const tr of trs) {
         const tds = Array.from(tr.querySelectorAll("td"));
@@ -308,31 +261,32 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
         const name = norm(tds[0].innerText || tds[0].textContent);
         if (!name) continue;
 
-        if (targetIdx == null) continue;
+        if (!targetHeader) continue;
 
-        // targetIdx is based on headers array; in table form, the date columns start at td[1]
-        // This mapping varies; we try a safe offset:
-        const possibleCells = [
-          tds[targetIdx],         // if headers include name col
-          tds[targetIdx + 1],     // if headers exclude name col
-          tds[targetIdx - 1]      // if headers include extra
-        ].filter(Boolean);
-
+        // try a couple offsets
+        const idxs = [targetHeader.idx, targetHeader.idx + 1, targetHeader.idx - 1].filter(i => i >= 1 && i < tds.length);
         let cellText = "";
-        for (const c of possibleCells) {
-          const txt = norm(c.innerText || c.textContent || "");
+        for (const i of idxs) {
+          const txt = norm(tds[i].innerText || tds[i].textContent || "");
           if (txt) { cellText = txt; break; }
         }
         if (!cellText) continue;
 
         const parsed = parseHoursAndType(cellText);
-        if (!parsed.looksLikeOut) continue;
-        if (!(parsed.hours > 0)) continue;
+        if (!parsed.looksOut || parsed.hours <= 0) continue;
 
         out.push({ name, hours: parsed.hours, type: parsed.type });
       }
 
-      return { out, debug };
+      return {
+        out,
+        debug: {
+          targetHeader,
+          headerSample: headers.slice(0, 12),
+          foundTables: tables.length,
+          rowsConsidered: trs.length
+        }
+      };
     }, { dateYmd });
 
     console.log("DEBUG scrape:", result.debug);
