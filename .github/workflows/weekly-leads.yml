@@ -3,14 +3,14 @@ name: Weekly Support Overview (Leads) — TEST CHANNEL ONLY
 on:
   schedule:
     # 6am America/Denver ≈ 13:00 UTC in winter (MST), 12:00 UTC in summer (MDT).
-    # Keeping 13:00 UTC for now. You can adjust if DST timing matters.
+    # Keeping 13:00 UTC for now.
     - cron: "0 13 * * 1"
   workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -21,8 +21,8 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install dependencies (no lockfile required)
+        run: npm install
 
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
