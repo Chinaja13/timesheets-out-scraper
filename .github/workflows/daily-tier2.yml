@@ -1,0 +1,49 @@
+name: Daily Support Out (Tier2) — TEST CHANNEL ONLY
+
+on:
+  schedule:
+    # 6am America/Denver ≈ 13:00 UTC in winter (MST), 12:00 UTC in summer (MDT).
+    # Using 13:00 UTC for now.
+    - cron: "0 13 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      date_ymd:
+        description: "yyyy-MM-dd (America/Denver)"
+        required: false
+        type: string
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run daily scraper (POSTS TO TEST CHANNEL ONLY)
+        run: npm run run:daily
+        env:
+          DATE_YMD: ${{ inputs.date_ymd }}
+
+          TS_USERNAME: ${{ secrets.TS_USERNAME }}
+          TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
+
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+
+          # ✅ FORCE ALL DAILY TEST POSTS TO TEST CHANNEL
+          SLACK_CHANNEL_ID_TIER2: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
+
+          # Optional filter (Support team only)
+          SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
