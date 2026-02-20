@@ -1,0 +1,25 @@
+name: Weekly Support Overview (Leads)
+
+on:
+  schedule:
+    - cron: "0 13 * * 1"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run run:weekly
+        env:
+          TS_USERNAME: ${{ secrets.TS_USERNAME }}
+          TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID_LEADS: ${{ secrets.SLACK_CHANNEL_ID_LEADS }}
+          SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
