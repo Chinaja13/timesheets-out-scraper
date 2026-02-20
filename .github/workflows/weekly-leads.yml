@@ -1,25 +1,41 @@
-name: Weekly Support Overview (Leads)
+name: Weekly Support Overview (Leads) — TEST CHANNEL ONLY
 
 on:
   schedule:
+    # 6am America/Denver ≈ 13:00 UTC in winter (MST), 12:00 UTC in summer (MDT).
+    # Keeping 13:00 UTC for now. You can adjust if DST timing matters.
     - cron: "0 13 * * 1"
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npm run run:weekly
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run weekly (posts to TEST channel only)
+        run: npm run run:weekly
         env:
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID_LEADS: ${{ secrets.SLACK_CHANNEL_ID_LEADS }}
+
+          # ✅ FORCE weekly output to your TEST channel
+          SLACK_CHANNEL_ID_LEADS: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
+
+          # Optional: filter to only your support team names (comma-separated) via secrets
           SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
