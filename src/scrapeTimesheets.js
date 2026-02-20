@@ -10,7 +10,6 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
   const LOGIN_URL = `${BASE}/default.cfm?page=Login`;
   const SCHEDULES_URL = `${BASE}/default.cfm?page=Schedules`;
 
-  // Make sure screenshots folder exists for GitHub artifact upload
   const shotsDir = "artifacts";
   if (!fs.existsSync(shotsDir)) fs.mkdirSync(shotsDir);
 
@@ -27,17 +26,151 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
     console.log("Saved HTML:", path);
   }
 
+  async function safeClick(locator, label, timeout = 15000) {
+    try {
+      if (await locator.count()) {
+        await locator.first().scrollIntoViewIfNeeded();
+        await locator.first().click({ timeout });
+        console.log("Clicked:", label);
+        return true;
+      }
+    } catch (e) {
+      console.log("Click failed:", label, String(e));
+    }
+    return false;
+  }
+
+  async function waitForAnyVisible(selectors, timeout = 30000) {
+    const loc = page.locator(selectors);
+    await loc.first().waitFor({ timeout, state: "visible" });
+    return loc;
+  }
+
+  function reCounterText(txt) {
+    // matches "0 / 39" or "39/39"
+    const m = String(txt || "").match(/(\d+)\s*\/\s*(\d+)/);
+    if (!m) return null;
+    return { a: Number(m[1]), b: Number(m[2]) };
+  }
+
+  async function readSelectedCounter() {
+    // The counter appears top-right in schedules view.
+    // We’ll search for a small "x / y" text on the page and pick the one with the biggest total.
+    const candidates = await page.locator("text=/\\d+\\s*\\/\\s*\\d+/").allTextContents();
+    let best = null;
+    for (const t of candidates) {
+      const c = reCounterText(t);
+      if (!c) continue;
+      if (!best || c.b > best.b) best = c;
+    }
+    return best; // {a,b} or null
+  }
+
+  async function openUserPickerAndSelectAll() {
+    // We’re trying to get from 0/39 -> 39/39
+
+    // 1) Try clicking an icon near the counter (common patterns: fa-users, fa-user-group, etc.)
+    // We’ll just click the most likely “people” icon variants on the page (schedules header area).
+    const iconCandidates = [
+      "i.fa-users",
+      "i[class*='fa-users']",
+      "i.fa-user-group",
+      "i[class*='user-group']",
+      "i[class*='users']",
+      "i[class*='people']",
+      "i[class*='group']",
+      // also sometimes it’s an svg or button:
+      "button:has(i[class*='users'])",
+      "button:has(i[class*='group'])",
+      "a:has(i[class*='users'])",
+      "a:has(i[class*='group'])",
+      // worst-case: click the counter itself
+      "text=/\\d+\\s*\\/\\s*\\d+/"
+    ];
+
+    let opened = false;
+    for (const sel of iconCandidates) {
+      const ok = await safeClick(page.locator(sel), `open-user-picker via ${sel}`, 8000);
+      if (ok) {
+        opened = true;
+        await page.waitForTimeout(600);
+        break;
+      }
+    }
+
+    await snap(opened ? "04a-after-open-user-picker" : "04a-user-picker-not-opened");
+    await dumpHtml(opened ? "04a-after-open-user-picker" : "04a-user-picker-not-opened");
+
+    // 2) Try "Select All"
+    // Your other UI had a span.checkmark with select-all class.
+    // This UI might have a checkbox label, menu item, or button.
+    const selectAllCandidates = [
+      "text=/select\\s*all/i",
+      "label:has-text('Select All')",
+      "span.cb-container-category.select-all",
+      "span.checkmark.cb-container-category.select-all",
+      "input[type='checkbox'] >> nth=0"
+    ];
+
+    let selected = false;
+    for (const sel of selectAllCandidates) {
+      const ok = await safeClick(page.locator(sel), `select-all via ${sel}`, 8000);
+      if (ok) {
+        selected = true;
+        await page.waitForTimeout(400);
+        break;
+      }
+    }
+
+    // 3) Click "Update"
+    const updateCandidates = [
+      "text=/\\bupdate\\b/i",
+      "button:has-text('Update')",
+      "div:has-text('Update')"
+    ];
+
+    let updated = false;
+    for (const sel of updateCandidates) {
+      const ok = await safeClick(page.locator(sel), `update via ${sel}`, 8000);
+      if (ok) {
+        updated = true;
+        // allow any loading/progress
+        await page.waitForLoadState("networkidle").catch(() => {});
+        await page.waitForTimeout(1200);
+        break;
+      }
+    }
+
+    await snap("04b-after-selectall-update");
+    await dumpHtml("04b-after-selectall-update");
+
+    // 4) Wait for counter to reflect selection (not 0/x)
+    // We’ll poll up to 30s.
+    const start = Date.now();
+    while (Date.now() - start < 30000) {
+      const c = await readSelectedCounter();
+      if (c && c.b >= 10 && c.a > 0) {
+        console.log("Counter now:", c);
+        return { opened, selected, updated, counter: c };
+      }
+      await page.waitForTimeout(1000);
+    }
+
+    const cFinal = await readSelectedCounter();
+    console.log("Counter final:", cFinal);
+    return { opened, selected, updated, counter: cFinal };
+  }
+
   try {
     // -----------------------
-    // 1) Login (use the exact login page you provided)
+    // 1) Login
     // -----------------------
     await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
     await snap("01-login-page");
 
-    await page.locator("#username, input[name='username']").first().fill(username);
-    await page.locator("#password, input[name='password']").first().fill(password);
+    await page.locator("#username, input[name='username']").first().fill(String(username || "").trim());
+    await page.locator("#password, input[name='password']").first().fill(String(password || "").trim());
 
-    // Click Login and wait for navigation/settle
     await Promise.all([
       page.waitForLoadState("networkidle"),
       page.locator("button.loginButton:has-text('Login'), button:has-text('Login')").first().click(),
@@ -46,72 +179,56 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
     await snap("02-after-login");
     await dumpHtml("02-after-login");
 
+    // If login failed, bail early with readable message
+    const loginFailed = page.locator("text=/login failed|invalid credentials/i");
+    if (await loginFailed.count()) {
+      throw new Error("Login failed (invalid credentials shown on page). Check TS_USERNAME/TS_PASSWORD secrets.");
+    }
+
     // -----------------------
     // 2) Go to Schedules
     // -----------------------
     await page.goto(SCHEDULES_URL, { waitUntil: "domcontentloaded" });
-
-    // Some Timesheets pages keep loading async; wait for something schedule-ish.
-    // We know names appear as .name-ellipses in your inspected DOM
     await page.waitForTimeout(1200);
 
-    // Wait up to 30s for either schedule wrapper or any schedule row name.
-    const scheduleReady = page.locator(".print-wrapper, .ts-schedule-table, .table-off, .name-ellipses");
-    await scheduleReady.first().waitFor({ timeout: 30000 });
+    // Wait for the Calendars & Schedules header OR any schedule grid element
+    await waitForAnyVisible("text=/Calendars\\s*&\\s*Schedules/i, text=/Schedules/i, .tsWeek, .print-wrapper, table", 30000);
 
     await snap("03-schedules-loaded");
     await dumpHtml("03-schedules-loaded");
 
     // -----------------------
-    // 3) Attempt: Users menu -> Select All -> Update (but don't hard-fail if UI differs)
+    // 3) Make sure users are selected (0/39 -> 39/39)
     // -----------------------
-    const menuIcon = page.locator(".menu-link-container.icon, .menu-link-container:has(i.fa-users-medical)");
-    if (await menuIcon.count()) {
-      // Ensure it's visible/clickable
-      await menuIcon.first().scrollIntoViewIfNeeded();
-      await menuIcon.first().click({ timeout: 15000 });
-      await page.waitForTimeout(700);
+    const before = await readSelectedCounter();
+    console.log("Counter before:", before);
 
-      // Click "Select All" (prefer the span you showed)
-      const selectAll = page.locator("span.cb-container-category.select-all, span.checkmark.cb-container-category.select-all");
-      if (await selectAll.count()) {
-        await selectAll.first().click({ timeout: 15000 });
-        await page.waitForTimeout(300);
-      } else {
-        // Fallback: first checkbox inside the opened menu
-        const anyCheckbox = page.locator("input[type='checkbox']").first();
-        if (await anyCheckbox.count()) await anyCheckbox.click({ timeout: 15000 });
-      }
-
-      // Click Update
-      const updateBtn = page.locator("div.update-menu-item:has-text('Update'), div.menu-link-item:has-text('Update')");
-      if (await updateBtn.count()) {
-        await updateBtn.first().click({ timeout: 15000 });
-        await page.waitForLoadState("networkidle");
-        await page.waitForTimeout(1200);
-      }
-
-      await snap("04-after-update");
+    // If we detect 0/xx, try to open picker and select all
+    if (before && before.b >= 10 && before.a === 0) {
+      console.log("Detected 0 selected; attempting Select All + Update...");
+      const res = await openUserPickerAndSelectAll();
+      console.log("SelectAll/Update result:", res);
     } else {
-      console.log("WARN: Users menu icon not found on this page. Skipping SelectAll/Update.");
-      await snap("04-menu-icon-not-found");
+      console.log("Counter does not look like 0/xx; skipping Select All step.");
     }
 
     // -----------------------
     // 4) Force Week view (if tab exists)
     // -----------------------
-    const weekTab = page.locator("a.tab-week:has-text('Week'), a.tab.tab-week");
+    const weekTab = page.locator("a.tab-week:has-text('Week'), a.tab.tab-week, button:has-text('Week')");
     if (await weekTab.count()) {
       await weekTab.first().click({ timeout: 15000 });
       await page.waitForTimeout(1200);
       await snap("05-week-view");
+      await dumpHtml("05-week-view");
     } else {
       console.log("WARN: Week tab not found. Continuing with current view.");
       await snap("05-week-tab-not-found");
+      await dumpHtml("05-week-tab-not-found");
     }
 
     // -----------------------
-    // 5) Scrape target day from headers + rows
+    // 5) Scrape day cells (same logic as before)
     // -----------------------
     const result = await page.evaluate(({ dateYmd }) => {
       const norm = (s) => String(s || "").replace(/\s+/g, " ").trim();
@@ -127,38 +244,33 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
         return `${y}-${m}-${day}`;
       }
 
-      // Headers (your DOM shows .grid-day-header .date_label)
-      const headerEls = Array.from(document.querySelectorAll(".grid-day-header .date_label, .grid-day-header.master-grid-cell .date_label"));
-      const headers = headerEls.map((el, idx) => ({
-        idx,
-        text: norm(el.textContent),
-        ymd: parseHeaderDateToYmd(norm(el.textContent)),
-      }));
+      // Try multiple header patterns (your UI varies)
+      const headerEls = Array.from(document.querySelectorAll(
+        ".grid-day-header .date_label, .grid-day-header.master-grid-cell .date_label, th, .tsWeek th"
+      ));
+
+      const headers = headerEls
+        .map((el, idx) => {
+          const text = norm(el.textContent);
+          const ymd = parseHeaderDateToYmd(text);
+          return { idx, text, ymd };
+        })
+        .filter(h => h.text && (h.ymd || /feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|jan/i.test(h.text)));
 
       const target = headers.find((h) => h.ymd === dateYmd);
       const targetIdx = target ? target.idx : null;
 
-      // Rows: your DOM shows [data-row-id] + .name-ellipses for the name
-      const table =
-        document.querySelector(".print-wrapper, .table-off.ts-schedule-table, .ts-schedule-table") || document.body;
-
-      const rowEls = Array.from(table.querySelectorAll("[data-row-id]"));
-
-      function getDayCells(rowEl) {
-        // Try common cell classes first
-        const a = Array.from(rowEl.querySelectorAll(".grid-cell, .grid-day-cell, .schedule-cell"));
-        if (a.length >= 7) return a;
-
-        // If the row is a flex row, children often represent columns
-        const kids = Array.from(rowEl.children).filter((c) => c.tagName === "DIV");
-        if (kids.length >= 7) return kids;
-
-        return [];
-      }
+      // Row names: in your screenshot it’s a left column with names (not .name-ellipses in this view)
+      const rowNameCells = Array.from(document.querySelectorAll("td:first-child, .name-ellipses"));
+      const debug = {
+        headers: headers.slice(0, 20),
+        targetIdx,
+        rowNameCount: rowNameCells.length,
+        sampleRowName: rowNameCells[0] ? norm(rowNameCells[0].textContent) : ""
+      };
 
       function parseHoursAndType(text) {
         const t = lower(text);
-
         const isSick = t.includes("sick");
         const isVac = t.includes("vac");
         const isPto = t.includes("pto") || t.includes("paid time off");
@@ -170,71 +282,66 @@ export async function scrapeWhoIsOut({ dateYmd, username, password }) {
         else if (isVac) type = "Vacation";
         else if (isHol) type = "Holiday";
 
-        const nums = Array.from(t.matchAll(/(\d+(?:\.\d+)?)(?:\s*h|\s*hr|\s*hrs|\b)/g)).map((m) => Number(m[1]));
+        const nums = Array.from(t.matchAll(/(\d+(?:\.\d+)?)/g)).map((m) => Number(m[1])).filter(n => !Number.isNaN(n));
         let hours = 0;
-        if (nums.length) hours = Math.max(...nums);
-        else if (type !== "Out" || t.includes("out")) hours = 8;
+        if (nums.length) {
+          // In your cells it’s like "8.00 PTO"
+          hours = Math.max(...nums);
+        }
 
-        const looksLikeOut =
-          isPto || isSick || isVac || isHol || t.includes("out") || t.includes("leave") || t.includes("off");
+        const looksLikeOut = isPto || isSick || isVac || isHol || t.includes("out") || t.includes("leave") || t.includes("off");
+        if (looksLikeOut && hours === 0) hours = 8;
 
         return { looksLikeOut, hours, type };
       }
 
-      const out = [];
-      const debug = {
-        headers,
-        targetIdx,
-        rowCount: rowEls.length,
-        sampleRowName: "",
-        sampleCellsCount: 0,
-        sampleCellText: "",
-      };
+      // Attempt to read the schedule grid from table rows if present
+      const table = document.querySelector("table") || document.querySelector(".tsWeek") || document.body;
+      const trs = Array.from(table.querySelectorAll("tr"));
 
-      for (const rowEl of rowEls) {
-        const nameEl = rowEl.querySelector(".name-ellipses");
-        const name = norm(nameEl ? nameEl.textContent : "");
+      const out = [];
+
+      for (const tr of trs) {
+        const tds = Array.from(tr.querySelectorAll("td"));
+        if (tds.length < 3) continue;
+
+        const name = norm(tds[0].innerText || tds[0].textContent);
         if (!name) continue;
 
-        if (!debug.sampleRowName) debug.sampleRowName = name;
+        if (targetIdx == null) continue;
 
-        const cells = getDayCells(rowEl);
-        if (!debug.sampleCellsCount && cells.length) debug.sampleCellsCount = cells.length;
+        // targetIdx is based on headers array; in table form, the date columns start at td[1]
+        // This mapping varies; we try a safe offset:
+        const possibleCells = [
+          tds[targetIdx],         // if headers include name col
+          tds[targetIdx + 1],     // if headers exclude name col
+          tds[targetIdx - 1]      // if headers include extra
+        ].filter(Boolean);
 
-        if (targetIdx == null || !cells.length) continue;
-
-        const cell = cells[targetIdx] || null;
-        if (!cell) continue;
-
-        const cellText = norm(cell.innerText || cell.textContent || "");
-        if (!debug.sampleCellText && cellText) debug.sampleCellText = cellText;
-
+        let cellText = "";
+        for (const c of possibleCells) {
+          const txt = norm(c.innerText || c.textContent || "");
+          if (txt) { cellText = txt; break; }
+        }
         if (!cellText) continue;
 
         const parsed = parseHoursAndType(cellText);
         if (!parsed.looksLikeOut) continue;
         if (!(parsed.hours > 0)) continue;
 
-        out.push({ name, hours: parsed.hours, type: parsed.type, raw: cellText });
+        out.push({ name, hours: parsed.hours, type: parsed.type });
       }
 
       return { out, debug };
     }, { dateYmd });
 
-    // Log debug into Actions output
-    console.log("DEBUG headers:", result?.debug?.headers);
-    console.log("DEBUG targetIdx:", result?.debug?.targetIdx);
-    console.log("DEBUG rowCount:", result?.debug?.rowCount);
-    console.log("DEBUG sampleRowName:", result?.debug?.sampleRowName);
-    console.log("DEBUG sampleCellsCount:", result?.debug?.sampleCellsCount);
-    console.log("DEBUG sampleCellText:", result?.debug?.sampleCellText);
-    console.log("DEBUG outCount:", (result?.out || []).length);
-    if (result?.out?.length) console.log("DEBUG outSample:", result.out.slice(0, 5));
+    console.log("DEBUG scrape:", result.debug);
+    console.log("DEBUG outCount:", (result.out || []).length);
 
     await snap("06-after-scrape");
     await dumpHtml("06-after-scrape");
 
-    return (result?.out || []).map(({ name, hours, type }) => ({ name, hours, type }));
+    return (result.out || []);
   } catch (e) {
     console.error("SCRAPE ERROR:", e);
     try {
