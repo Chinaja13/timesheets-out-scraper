@@ -1,0 +1,32 @@
+name: Daily Support Out (Tier2)
+
+on:
+  schedule:
+    # 6am America/Denver is 13:00 UTC in winter (MST), 12:00 UTC in summer (MDT).
+    # We'll keep it simple with 13:00 UTC. If DST matters, use Option B (Google trigger) or adjust seasonally.
+    - cron: "0 13 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      date_ymd:
+        description: "yyyy-MM-dd (America/Denver)"
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run run:daily
+        env:
+          DATE_YMD: ${{ inputs.date_ymd }}
+          TS_USERNAME: ${{ secrets.TS_USERNAME }}
+          TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID_TIER2: ${{ secrets.SLACK_CHANNEL_ID_TIER2 }}
+          SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
