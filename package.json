@@ -1,0 +1,13 @@
+{
+  "name": "timesheets-out-scraper",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "run:daily": "node src/runDaily.js",
+    "run:weekly": "node src/runWeekly.js"
+  },
+  "dependencies": {
+    "@slack/web-api": "^7.6.0",
+    "playwright": "^1.41.2"
+  }
+}
