@@ -1,37 +1,59 @@
-import { scrapeWhoIsOut } from "./scrapeTimesheets.js";
-import { postSlack } from "./lib/slack.js";
-import { ymdInDenver } from "./lib/date.js";
-import { makeSupportSetFromEnv, isSupportName } from "./lib/supportFilter.js";
-import { buildTier2Daily, sortOutList } from "./lib/format.js";
+// src/runDaily.js
+const { chromium } = require("playwright");
+const { scrapeWhoIsOut, buildResultsForDate, filterSupportOnly } = require("./scrapeTimesheets");
+const { postSlackMessage } = require("./slack");
 
-async function main() {
-  const dateYmd = process.env.DATE_YMD || ymdInDenver(new Date());
-
-  const username = process.env.TS_USERNAME;
-  const password = process.env.TS_PASSWORD;
-  if (!username || !password) throw new Error("Missing TS_USERNAME / TS_PASSWORD");
-
-  const tier2Channel = process.env.SLACK_CHANNEL_ID_TIER2;
-  if (!tier2Channel) throw new Error("Missing SLACK_CHANNEL_ID_TIER2");
-
-  const supportSet = makeSupportSetFromEnv();
-
-  const raw = await scrapeWhoIsOut({ dateYmd, username, password });
-
-  const filtered = raw.filter(p => isSupportName(p.name, supportSet));
-  const outList = sortOutList(filtered);
-
-  if (!outList.length) {
-    console.log("Nobody out — no post.");
-    return;
-  }
-
-  const msg = buildTier2Daily(outList);
-  await postSlack(tier2Channel, msg);
-  console.log("Posted Tier2:", msg);
+function fmtHours(n) {
+  const x = Math.round((Number(n) || 0) * 100) / 100;
+  return String(x).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
 }
 
-main().catch(e => {
-  console.error(e);
+function buildTier2Message(list) {
+  if (!list.length) return null;
+
+  const parts = list.map(p => {
+    if (p.hours >= 7.99) return `${p.name} is out today`;
+    return `${p.name} is out ${fmtHours(p.hours)} hours today`;
+  });
+
+  if (parts.length === 1) return `@channel ${parts[0]}.`;
+  if (parts.length === 2) return `@channel ${parts[0]}, and ${parts[1]}.`;
+  return `@channel ${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}.`;
+}
+
+async function main() {
+  const artifactsDir = "artifacts";
+  const ymd = process.env.DATE_YMD;
+  if (!ymd) throw new Error("Missing DATE_YMD env var (yyyy-mm-dd).");
+
+  const slackToken = process.env.SLACK_BOT_TOKEN;
+  const slackChannel = process.env.SLACK_CHANNEL_ID_TEST; // ALWAYS TEST CHANNEL
+  if (!slackToken || !slackChannel) throw new Error("Missing SLACK_BOT_TOKEN or SLACK_CHANNEL_ID_TEST.");
+
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+
+  try {
+    const { counter, grid } = await scrapeWhoIsOut(page, { artifactsDir });
+
+    const allOut = buildResultsForDate(grid, ymd);
+    const supportOut = filterSupportOnly(allOut);
+
+    const msg = buildTier2Message(supportOut);
+
+    // For now: always post a TEST summary so we can verify behavior
+    const header =
+      `*TEST DAILY* (${ymd}) | Selected ${counter.selected}/${counter.total}\n` +
+      (msg ? msg : "_No support team members marked out today._");
+
+    await postSlackMessage({ token: slackToken, channel: slackChannel, text: header });
+  } finally {
+    await page.close().catch(() => {});
+    await browser.close().catch(() => {});
+  }
+}
+
+main().catch(async (e) => {
+  console.error("RUN ERROR:", e);
   process.exit(1);
 });
