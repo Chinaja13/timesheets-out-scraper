@@ -1,309 +1,362 @@
-import { chromium } from "playwright";
-import fs from "fs";
+// src/scrapeTimesheets.js
+const fs = require("fs");
+const path = require("path");
 
-export async function scrapeWhoIsOut({ dateYmd, username, password }) {
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  const page = await context.newPage();
+/**
+ * Timesheets.com schedule scraper
+ * - Logs in
+ * - Goes to Schedules
+ * - Select All + Update
+ * - Waits for N/N counter (e.g. 39 / 39)
+ * - Scrapes time-off blocks from the week grid
+ *
+ * NOTE: We intentionally do NOT click the "Week" tab anymore because
+ * it can reset the selection state (39/39 -> 0/39).
+ */
 
-  const BASE = "https://secure.timesheets.com";
-  const LOGIN_URL = `${BASE}/default.cfm?page=Login`;
-  const SCHEDULES_URL = `${BASE}/default.cfm?page=Schedules`;
-
-  const shotsDir = "artifacts";
-  if (!fs.existsSync(shotsDir)) fs.mkdirSync(shotsDir);
-
-  async function snap(name) {
-    const path = `${shotsDir}/${name}.png`;
-    await page.screenshot({ path, fullPage: true });
-    console.log("Saved screenshot:", path);
-  }
-
-  async function dumpHtml(name) {
-    const path = `${shotsDir}/${name}.html`;
-    const html = await page.content();
-    fs.writeFileSync(path, html, "utf8");
-    console.log("Saved HTML:", path);
-  }
-
-  async function waitForOverlayToClear(timeoutMs = 60000) {
-    // Overlay often shows "Loading..." in the middle
-    const overlay = page.locator("text=/Loading\\.\\.\\./i");
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      try {
-        if ((await overlay.count()) === 0) return;
-        const visible = await overlay.first().isVisible().catch(() => false);
-        if (!visible) return;
-      } catch {
-        return;
-      }
-      await page.waitForTimeout(500);
-    }
-    // Don't hard fail; just log and keep going
-    console.log("WARN: Loading overlay still visible after timeout");
-  }
-
-  function parseCounter(txt) {
-    const m = String(txt || "").match(/(\d+)\s*\/\s*(\d+)/);
-    if (!m) return null;
-    return { selected: Number(m[1]), total: Number(m[2]) };
-  }
-
-  async function readCounter() {
-    const counterLoc = page.locator(
-      "#app > div > div.menu-link.no-print.wide-counter-layout > span > div > span.float-right"
-    );
-    if ((await counterLoc.count()) === 0) return null;
-    const txt = await counterLoc.first().innerText().catch(() => "");
-    return parseCounter(txt);
-  }
-
-  async function waitForCounterNN(timeoutMs = 60000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const c = await readCounter();
-      if (c && c.total > 0 && c.selected === c.total) return c;
-      await page.waitForTimeout(500);
-    }
-    return await readCounter();
-  }
-
-  async function clickWithRetry(locator, label, attempts = 3, delayMs = 700) {
-    for (let i = 1; i <= attempts; i++) {
-      try {
-        await locator.first().scrollIntoViewIfNeeded();
-        await locator.first().click({ timeout: 15000 });
-        console.log(`Clicked: ${label} (attempt ${i})`);
-        return true;
-      } catch (e) {
-        console.log(`Click failed: ${label} (attempt ${i})`, String(e));
-        if (i < attempts) await page.waitForTimeout(delayMs);
-      }
-    }
-    return false;
-  }
-
-  async function ensureAllUsersSelected() {
-    // These are YOUR selectors (stable)
-    const peopleIcon = page.locator(
-      "#app > div > div.menu-link.no-print.wide-counter-layout > div > div.menu-link-container.icon > i"
-    );
-
-    const selectAllCheckmark = page.locator(
-      "#app > div > div.noPrint > div.slide-menu > nav > div.menu-links.menu-select-all > div.align-left > div > label > span.checkmark.cb-container-category.select-all"
-    );
-
-    const updateBtn = page.locator(
-      "#app > div > div.noPrint > div.slide-menu > nav > div.menu-links.top-bar > div.menu-link-item.update-menu-item.indent-1.tour-BTS-Update"
-    );
-
-    // Wait for page to be usable
-    await waitForOverlayToClear(60000);
-
-    const before = await readCounter();
-    console.log("Counter before:", before);
-
-    // If already N/N, we're good
-    if (before && before.total > 0 && before.selected === before.total) {
-      console.log("Already selected all users.");
-      return before;
-    }
-
-    // If 0/0, the UI isn't populated yet. Wait for it to become something real (0/39)
-    if (!before || (before.total === 0 && before.selected === 0)) {
-      console.log("Counter is 0/0 — waiting for it to populate...");
-      const populated = await waitForCounterToHaveTotal(60000);
-      console.log("Counter after populate wait:", populated);
-    }
-
-    // Open the slide-menu (people icon)
-    await clickWithRetry(peopleIcon, "People icon (open user picker)", 4, 900);
-    await page.waitForTimeout(800);
-
-    // Click Select All
-    await clickWithRetry(selectAllCheckmark, "Select All checkmark", 4, 900);
-
-    // Click Update
-    await clickWithRetry(updateBtn, "Update button", 4, 900);
-
-    // After update, there is often a loading overlay and the counter updates
-    await waitForOverlayToClear(90000);
-
-    const after = await waitForCounterNN(90000);
-    console.log("Counter after:", after);
-
-    return after;
-  }
-
-  async function waitForCounterToHaveTotal(timeoutMs = 60000) {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const c = await readCounter();
-      if (c && c.total > 0) return c;
-      await page.waitForTimeout(500);
-    }
-    return await readCounter();
-  }
-
-  try {
-    // 1) Login
-    await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
-    await snap("01-login-page");
-
-    await page.locator("#username, input[name='username']").first().fill(String(username || "").trim());
-    await page.locator("#password, input[name='password']").first().fill(String(password || "").trim());
-
-    await Promise.all([
-      page.waitForLoadState("domcontentloaded"),
-      page.locator("button.loginButton:has-text('Login'), button:has-text('Login')").first().click(),
-    ]);
-
-    // Let redirects / app boot happen
-    await page.waitForLoadState("networkidle").catch(() => {});
-    await waitForOverlayToClear(60000);
-
-    await snap("02-after-login");
-    await dumpHtml("02-after-login");
-
-    // 2) Go to Schedules directly
-    await page.goto(SCHEDULES_URL, { waitUntil: "domcontentloaded" });
-    await page.waitForLoadState("networkidle").catch(() => {});
-    await waitForOverlayToClear(90000);
-
-    await snap("03-schedules-loaded");
-    await dumpHtml("03-schedules-loaded");
-
-    // 3) Ensure all users selected (wait for 39/39)
-    const counter = await ensureAllUsersSelected();
-    await snap("04-after-update");
-    await dumpHtml("04-after-update");
-
-    if (!counter || !counter.total || counter.selected !== counter.total) {
-      console.log("WARN: Did not reach N/N selection. Counter=", counter);
-      // continue anyway; maybe still loads enough to scrape
-    }
-
-    // 4) Go to Week view
-    const weekTab = page.locator("a.tab-week:has-text('Week'), a.tab.tab-week, button:has-text('Week')");
-    if (await weekTab.count()) {
-      await clickWithRetry(weekTab, "Week tab", 3, 900);
-      await page.waitForLoadState("networkidle").catch(() => {});
-      await waitForOverlayToClear(90000);
-    }
-
-    await snap("05-week-view");
-    await dumpHtml("05-week-view");
-
-    // 5) Scrape (kept simple; your formatters handle filtering support)
-    const result = await page.evaluate(({ dateYmd }) => {
-      const norm = (s) => String(s || "").replace(/\s+/g, " ").trim();
-      const lower = (s) => norm(s).toLowerCase();
-
-      function parseHeaderDateToYmd(label) {
-        const t = Date.parse(label);
-        if (Number.isNaN(t)) return null;
-        const d = new Date(t);
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, "0");
-        const day = String(d.getDate()).padStart(2, "0");
-        return `${y}-${m}-${day}`;
-      }
-
-      // Headers (works with both old/new schedule table variants)
-      const headerEls = Array.from(document.querySelectorAll(
-        ".grid-day-header .date_label, .grid-day-header.master-grid-cell .date_label, thead th, .tsWeek th, .table ts-schedule-table-header th"
-      ));
-
-      const headers = headerEls
-        .map((el, idx) => {
-          const text = norm(el.textContent);
-          const ymd = parseHeaderDateToYmd(text);
-          return { idx, text, ymd };
-        })
-        .filter(h => h.text);
-
-      const targetHeader = headers.find(h => h.ymd === dateYmd) || null;
-
-      function parseHoursAndType(text) {
-        const t = lower(text);
-        const isSick = t.includes("sick");
-        const isPto = t.includes("pto") || t.includes("paid time off");
-        const isVac = t.includes("vac");
-        const isHol = t.includes("holiday");
-
-        let type = "Out";
-        if (isSick) type = "Sick";
-        else if (isPto) type = "PTO";
-        else if (isVac) type = "Vacation";
-        else if (isHol) type = "Holiday";
-
-        const nums = Array.from(t.matchAll(/(\d+(?:\.\d+)?)/g)).map(m => Number(m[1])).filter(n => !Number.isNaN(n));
-        let hours = nums.length ? Math.max(...nums) : 0;
-
-        const looksOut = isPto || isSick || isVac || isHol || t.includes("time off") || t.includes("unavailable");
-        if (looksOut && hours === 0) hours = 8;
-
-        return { looksOut, hours, type };
-      }
-
-      const out = [];
-
-      // Strategy A: schedule grid table rows
-      const tables = Array.from(document.querySelectorAll("table"));
-      const table = tables.length ? tables[0] : null;
-      const trs = table ? Array.from(table.querySelectorAll("tr")) : [];
-
-      for (const tr of trs) {
-        const tds = Array.from(tr.querySelectorAll("td"));
-        if (tds.length < 3) continue;
-
-        const name = norm(tds[0].innerText || tds[0].textContent);
-        if (!name) continue;
-
-        if (!targetHeader) continue;
-
-        // try a couple offsets
-        const idxs = [targetHeader.idx, targetHeader.idx + 1, targetHeader.idx - 1].filter(i => i >= 1 && i < tds.length);
-        let cellText = "";
-        for (const i of idxs) {
-          const txt = norm(tds[i].innerText || tds[i].textContent || "");
-          if (txt) { cellText = txt; break; }
-        }
-        if (!cellText) continue;
-
-        const parsed = parseHoursAndType(cellText);
-        if (!parsed.looksOut || parsed.hours <= 0) continue;
-
-        out.push({ name, hours: parsed.hours, type: parsed.type });
-      }
-
-      return {
-        out,
-        debug: {
-          targetHeader,
-          headerSample: headers.slice(0, 12),
-          foundTables: tables.length,
-          rowsConsidered: trs.length
-        }
-      };
-    }, { dateYmd });
-
-    console.log("DEBUG scrape:", result.debug);
-    console.log("DEBUG outCount:", (result.out || []).length);
-
-    await snap("06-after-scrape");
-    await dumpHtml("06-after-scrape");
-
-    return (result.out || []);
-  } catch (e) {
-    console.error("SCRAPE ERROR:", e);
-    try {
-      await snap("99-error");
-      await dumpHtml("99-error");
-    } catch {}
-    throw e;
-  } finally {
-    await browser.close();
-  }
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true });
 }
+
+async function saveDebug(page, artifactsDir, name) {
+  ensureDir(artifactsDir);
+  await page.screenshot({ path: path.join(artifactsDir, `${name}.png`), fullPage: true });
+  fs.writeFileSync(path.join(artifactsDir, `${name}.html`), await page.content(), "utf8");
+}
+
+async function waitForAnyVisible(page, selectors, opts = {}) {
+  const timeout = opts.timeout ?? 60000;
+  const pollMs = opts.pollMs ?? 250;
+  const start = Date.now();
+  const errs = [];
+
+  while (Date.now() - start < timeout) {
+    for (const sel of selectors) {
+      try {
+        const loc = page.locator(sel).first();
+        if (await loc.count()) {
+          if (await loc.isVisible().catch(() => false)) return sel;
+        }
+      } catch (e) {
+        errs.push(`${sel}: ${String(e).slice(0, 160)}`);
+      }
+    }
+    await page.waitForTimeout(pollMs);
+  }
+
+  throw new Error(
+    `waitForAnyVisible timeout (${timeout}ms). Tried:\n- ${selectors.join("\n- ")}\n` +
+      (errs.length ? `\nRecent errors:\n${errs.slice(-8).join("\n")}\n` : "")
+  );
+}
+
+async function safeClick(page, selector, opts = {}) {
+  const timeout = opts.timeout ?? 60000;
+
+  const loc = page.locator(selector).first();
+  await loc.waitFor({ state: "visible", timeout });
+  await loc.scrollIntoViewIfNeeded();
+
+  // Some of these elements are icon-only and can be "covered"—force helps.
+  await loc.click({ timeout, force: true });
+}
+
+function parseSupportNamesEnv() {
+  const raw = process.env.SUPPORT_TEAM_NAMES || "";
+  // allow JSON array OR newline OR comma separated
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.map(String).map(s => s.trim()).filter(Boolean);
+  } catch (e) {}
+
+  return raw
+    .split(/\r?\n|,/g)
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+
+function normalizeName(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function toYmdFromLabel(label) {
+  // label examples: "Feb 19, 2026"
+  const d = new Date(label);
+  if (Number.isNaN(d.getTime())) return null;
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+async function waitForCounterReady(page, opts = {}) {
+  const timeout = opts.timeout ?? 120000;
+  const counterSel = opts.counterSel;
+
+  const start = Date.now();
+
+  while (Date.now() - start < timeout) {
+    // if a loading overlay exists, wait for it to disappear
+    const loading = page.locator("text=Loading...").first();
+    if ((await loading.count().catch(() => 0)) > 0) {
+      const isVis = await loading.isVisible().catch(() => false);
+      if (isVis) {
+        await page.waitForTimeout(300);
+        continue;
+      }
+    }
+
+    const txt = await page
+      .locator(counterSel)
+      .first()
+      .textContent()
+      .catch(() => "");
+
+    const m = String(txt || "").match(/(\d+)\s*\/\s*(\d+)/);
+    if (m) {
+      const a = Number(m[1]);
+      const b = Number(m[2]);
+      // ready means "b>0 and a===b"
+      if (b > 0 && a === b) return { selected: a, total: b, raw: String(txt || "").trim() };
+    }
+
+    await page.waitForTimeout(350);
+  }
+
+  throw new Error(`Counter never reached N/N ready state within timeout. Selector: ${counterSel}`);
+}
+
+async function scrapeGrid(page) {
+  // We’ll extract:
+  // - Header date labels and their screen positions
+  // - Each row name
+  // - Any blocks whose text contains PTO/Sick/etc, mapped to the correct day by X position
+  return await page.evaluate(() => {
+    function norm(s) {
+      return String(s || "").replace(/\s+/g, " ").trim();
+    }
+
+    // header labels (dates)
+    const headerEls = Array.from(document.querySelectorAll(".grid-day-header .date_label"));
+    const headers = headerEls
+      .map((el) => ({
+        label: norm(el.textContent),
+        rect: el.getBoundingClientRect(),
+      }))
+      .filter((h) => h.label && h.rect && h.rect.width > 0);
+
+    // row containers
+    const rowEls = Array.from(
+      document.querySelectorAll(".schedule-row-item .grid-row-off, .schedule-row-item .schedule-row, .grid-row-off.schedule-row")
+    );
+
+    const rows = [];
+
+    for (const rowEl of rowEls) {
+      const nameEl = rowEl.querySelector(".name-ellipses");
+      const name = norm(nameEl ? nameEl.textContent : "");
+      if (!name) continue;
+
+      // Find candidate blocks inside the row by text content
+      const candidates = Array.from(rowEl.querySelectorAll("div, span"))
+        .map((el) => {
+          const t = norm(el.textContent);
+          if (!t) return null;
+          // must contain time-off keywords and a number
+          if (!/(pto|sick|vacation|holiday|time off)/i.test(t)) return null;
+          if (!/\d/.test(t)) return null;
+          const r = el.getBoundingClientRect();
+          if (!r || r.width < 5 || r.height < 5) return null;
+          return { text: t, rect: r };
+        })
+        .filter(Boolean);
+
+      const items = [];
+
+      for (const c of candidates) {
+        const cx = c.rect.left + c.rect.width / 2;
+
+        // map to header by horizontal containment
+        let dayLabel = null;
+        for (const h of headers) {
+          // allow some padding since headers may not perfectly align
+          const left = h.rect.left - 8;
+          const right = h.rect.right + 8;
+          if (cx >= left && cx <= right) {
+            dayLabel = h.label;
+            break;
+          }
+        }
+        if (!dayLabel) continue;
+
+        items.push({
+          dayLabel,
+          text: c.text,
+        });
+      }
+
+      if (items.length) rows.push({ name, items });
+    }
+
+    return { headers: headers.map(h => h.label), rows };
+  });
+}
+
+function parseHoursAndType(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  const m = t.match(/(\d+(?:\.\d+)?)/);
+  const hours = m ? Number(m[1]) : null;
+
+  let type = "Out";
+  if (/sick/i.test(t)) type = "Sick";
+  else if (/pto/i.test(t)) type = "PTO";
+  else if (/vacat/i.test(t)) type = "Vacation";
+  else if (/holiday/i.test(t)) type = "Holiday";
+  else if (/time off/i.test(t)) type = "Time Off";
+
+  return { hours, type, raw: t };
+}
+
+function buildResultsForDate(grid, targetYmd) {
+  // Map each header label -> ymd
+  const headerYmd = {};
+  for (const lbl of grid.headers || []) {
+    const d = new Date(lbl);
+    if (!Number.isNaN(d.getTime())) {
+      const y = d.getUTCFullYear();
+      const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(d.getUTCDate()).padStart(2, "0");
+      headerYmd[lbl] = `${y}-${m}-${day}`;
+    }
+  }
+
+  const out = [];
+  for (const r of grid.rows || []) {
+    const hits = (r.items || [])
+      .filter(it => headerYmd[it.dayLabel] === targetYmd)
+      .map(it => parseHoursAndType(it.text))
+      .filter(x => x.hours && x.hours > 0);
+
+    if (!hits.length) continue;
+
+    // roll up hours by type
+    const totals = { PTO: 0, Sick: 0, Vacation: 0, Holiday: 0, "Time Off": 0, Out: 0 };
+    for (const h of hits) totals[h.type] = (totals[h.type] || 0) + h.hours;
+
+    const totalHours = Object.values(totals).reduce((a, b) => a + b, 0);
+
+    out.push({
+      name: r.name,
+      hours: Math.round(totalHours * 100) / 100,
+      breakdown: totals,
+      raw: hits.map(h => h.raw),
+    });
+  }
+
+  return out;
+}
+
+function filterSupportOnly(list) {
+  const support = parseSupportNamesEnv();
+  const allow = new Set(support.map(normalizeName));
+  return (list || []).filter(p => allow.has(normalizeName(p.name)));
+}
+
+async function scrapeWhoIsOut(page, { artifactsDir = "artifacts" } = {}) {
+  const LOGIN_URL = "https://secure.timesheets.com/default.cfm?page=Login";
+  const SCHEDULES_URL = "https://secure.timesheets.com/default.cfm?page=Schedules";
+
+  const sel = {
+    username: "#username",
+    password: "#password",
+    loginBtn: "button.loginButton",
+
+    // Your provided selectors:
+    usersIcon: ".menu-link-container.icon i.open-menu.tour-BTS-Users",
+    selectAll: "span.checkmark.cb-container-category.select-all",
+    updateBtn: "div.menu-link-item.update-menu-item.indent-1.tour-BTS-Update",
+    counter: "span.float-right",
+  };
+
+  const username = process.env.TS_USERNAME;
+  const password = process.env.TS_PASSWORD;
+  if (!username || !password) throw new Error("Missing TS_USERNAME / TS_PASSWORD env vars.");
+
+  // Go to login
+  await page.goto(LOGIN_URL, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(500);
+  await saveDebug(page, artifactsDir, "01-login-page");
+
+  // Fill + login
+  await page.locator(sel.username).fill(username);
+  await page.locator(sel.password).fill(password);
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => null),
+    page.locator(sel.loginBtn).click({ force: true }),
+  ]);
+
+  await page.waitForTimeout(800);
+  await saveDebug(page, artifactsDir, "02-after-login");
+
+  // Go straight to schedules
+  await page.goto(SCHEDULES_URL, { waitUntil: "domcontentloaded" });
+  await page.waitForTimeout(800);
+
+  // Wait for schedules area to exist (ANY of these)
+  await waitForAnyVisible(page, [
+    "text=Calendars & Schedules",
+    "text=Schedules",
+    ".tsWeek",
+    ".print-wrapper",
+    ".ts-schedule-table",
+    "table",
+  ], { timeout: 90000 });
+
+  await saveDebug(page, artifactsDir, "03-schedules-page");
+
+  // Open users menu
+  await safeClick(page, sel.usersIcon, { timeout: 90000 });
+  await page.waitForTimeout(500);
+
+  // Select all
+  await safeClick(page, sel.selectAll, { timeout: 90000 });
+  await page.waitForTimeout(300);
+
+  // Update
+  await safeClick(page, sel.updateBtn, { timeout: 90000 });
+
+  // Wait for N/N
+  const counter = await waitForCounterReady(page, { counterSel: sel.counter, timeout: 150000 });
+  await page.waitForTimeout(800);
+  await saveDebug(page, artifactsDir, "04-after-update");
+
+  // IMPORTANT: do NOT click Week tab (it can reset selection)
+  // Instead, just wait for the grid to be stable.
+  // If a loading overlay appears, wait until it’s gone.
+  const loading = page.locator("text=Loading...").first();
+  if ((await loading.count().catch(() => 0)) > 0) {
+    await loading.waitFor({ state: "hidden", timeout: 120000 }).catch(() => {});
+  }
+  await page.waitForTimeout(1200);
+
+  // Ensure some row names exist
+  await waitForAnyVisible(page, [".name-ellipses", ".schedule-row-item", ".grid-row-off"], { timeout: 120000 });
+  await saveDebug(page, artifactsDir, "05-ready-to-scrape");
+
+  const grid = await scrapeGrid(page);
+
+  return {
+    counter,
+    grid,
+  };
+}
+
+module.exports = {
+  scrapeWhoIsOut,
+  buildResultsForDate,
+  filterSupportOnly,
+};
