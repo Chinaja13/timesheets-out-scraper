@@ -1,7 +1,7 @@
 // src/runWeeklyLeads.js
-const { chromium } = require("playwright");
-const { scrapeWhoIsOut, filterSupportOnly } = require("./scrapeTimesheets");
-const { postSlackMessage } = require("./slack");
+import { chromium } from "playwright";
+import { scrapeWhoIsOut, filterSupportOnly } from "./scrapeTimesheets.js";
+import { postSlackMessage } from "./slack.js";
 
 function toYmdFromLabel(label) {
   const d = new Date(label);
@@ -18,7 +18,12 @@ function fmtHours(n) {
 }
 
 function classifyFromBreakdown(b) {
-  const pto = (b.PTO || 0) + (b.Vacation || 0) + (b.Holiday || 0) + (b["Time Off"] || 0) + (b.Out || 0);
+  const pto =
+    (b.PTO || 0) +
+    (b.Vacation || 0) +
+    (b.Holiday || 0) +
+    (b["Time Off"] || 0) +
+    (b.Out || 0);
   const sick = b.Sick || 0;
   if (pto > 0 && sick > 0) return "PTO+Sick";
   if (sick > 0) return "Sick";
@@ -47,7 +52,6 @@ async function main() {
         const ymd = toYmdFromLabel(it.dayLabel);
         if (!ymd) continue;
 
-        // parse hours + type quickly
         const m = String(it.text || "").match(/(\d+(?:\.\d+)?)/);
         const hours = m ? Number(m[1]) : 0;
         if (!hours) continue;
@@ -88,7 +92,9 @@ async function main() {
       if (!list.length) {
         blocks.push(`*${ymd}*\nNo one out`);
       } else {
-        const lines = list.map(p => `${p.name} — ${fmtHours(p.hours)}h (${classifyFromBreakdown(p.breakdown)})`);
+        const lines = list.map(
+          (p) => `${p.name} — ${fmtHours(p.hours)}h (${classifyFromBreakdown(p.breakdown)})`
+        );
         blocks.push(`*${ymd}*\n${lines.join("\n")}`);
       }
     }
