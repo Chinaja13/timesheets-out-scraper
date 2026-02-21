@@ -1,7 +1,7 @@
 // src/runDaily.js
-const { chromium } = require("playwright");
-const { scrapeWhoIsOut, buildResultsForDate, filterSupportOnly } = require("./scrapeTimesheets");
-const { postSlackMessage } = require("./slack");
+import { chromium } from "playwright";
+import { scrapeWhoIsOut, buildResultsForDate, filterSupportOnly } from "./scrapeTimesheets.js";
+import { postSlackMessage } from "./slack.js";
 
 function fmtHours(n) {
   const x = Math.round((Number(n) || 0) * 100) / 100;
@@ -11,7 +11,7 @@ function fmtHours(n) {
 function buildTier2Message(list) {
   if (!list.length) return null;
 
-  const parts = list.map(p => {
+  const parts = list.map((p) => {
     if (p.hours >= 7.99) return `${p.name} is out today`;
     return `${p.name} is out ${fmtHours(p.hours)} hours today`;
   });
@@ -41,7 +41,6 @@ async function main() {
 
     const msg = buildTier2Message(supportOut);
 
-    // For now: always post a TEST summary so we can verify behavior
     const header =
       `*TEST DAILY* (${ymd}) | Selected ${counter.selected}/${counter.total}\n` +
       (msg ? msg : "_No support team members marked out today._");
@@ -53,7 +52,7 @@ async function main() {
   }
 }
 
-main().catch(async (e) => {
+main().catch((e) => {
   console.error("RUN ERROR:", e);
   process.exit(1);
 });
