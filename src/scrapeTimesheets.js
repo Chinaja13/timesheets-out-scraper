@@ -1,6 +1,6 @@
 // src/scrapeTimesheets.js
-const fs = require("fs");
-const path = require("path");
+import fs from "fs";
+import path from "path";
 
 /**
  * Timesheets.com schedule scraper
@@ -20,8 +20,15 @@ function ensureDir(dir) {
 
 async function saveDebug(page, artifactsDir, name) {
   ensureDir(artifactsDir);
-  await page.screenshot({ path: path.join(artifactsDir, `${name}.png`), fullPage: true });
-  fs.writeFileSync(path.join(artifactsDir, `${name}.html`), await page.content(), "utf8");
+  await page.screenshot({
+    path: path.join(artifactsDir, `${name}.png`),
+    fullPage: true,
+  });
+  fs.writeFileSync(
+    path.join(artifactsDir, `${name}.html`),
+    await page.content(),
+    "utf8"
+  );
 }
 
 async function waitForAnyVisible(page, selectors, opts = {}) {
@@ -45,8 +52,12 @@ async function waitForAnyVisible(page, selectors, opts = {}) {
   }
 
   throw new Error(
-    `waitForAnyVisible timeout (${timeout}ms). Tried:\n- ${selectors.join("\n- ")}\n` +
-      (errs.length ? `\nRecent errors:\n${errs.slice(-8).join("\n")}\n` : "")
+    `waitForAnyVisible timeout (${timeout}ms). Tried:\n- ${selectors.join(
+      "\n- "
+    )}\n` +
+      (errs.length
+        ? `\nRecent errors:\n${errs.slice(-8).join("\n")}\n`
+        : "")
   );
 }
 
@@ -57,7 +68,7 @@ async function safeClick(page, selector, opts = {}) {
   await loc.waitFor({ state: "visible", timeout });
   await loc.scrollIntoViewIfNeeded();
 
-  // Some of these elements are icon-only and can be "covered"—force helps.
+  // Some icon-only elements are "covered"—force helps.
   await loc.click({ timeout, force: true });
 }
 
@@ -66,12 +77,13 @@ function parseSupportNamesEnv() {
   // allow JSON array OR newline OR comma separated
   try {
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) return parsed.map(String).map(s => s.trim()).filter(Boolean);
+    if (Array.isArray(parsed))
+      return parsed.map(String).map((s) => s.trim()).filter(Boolean);
   } catch (e) {}
 
   return raw
     .split(/\r?\n|,/g)
-    .map(s => s.trim())
+    .map((s) => s.trim())
     .filter(Boolean);
 }
 
@@ -81,16 +93,6 @@ function normalizeName(s) {
     .replace(/[^a-z0-9 ]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function toYmdFromLabel(label) {
-  // label examples: "Feb 19, 2026"
-  const d = new Date(label);
-  if (Number.isNaN(d.getTime())) return null;
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
 }
 
 async function waitForCounterReady(page, opts = {}) {
@@ -127,7 +129,9 @@ async function waitForCounterReady(page, opts = {}) {
     await page.waitForTimeout(350);
   }
 
-  throw new Error(`Counter never reached N/N ready state within timeout. Selector: ${counterSel}`);
+  throw new Error(
+    `Counter never reached N/N ready state within timeout. Selector: ${counterSel}`
+  );
 }
 
 async function scrapeGrid(page) {
@@ -141,7 +145,9 @@ async function scrapeGrid(page) {
     }
 
     // header labels (dates)
-    const headerEls = Array.from(document.querySelectorAll(".grid-day-header .date_label"));
+    const headerEls = Array.from(
+      document.querySelectorAll(".grid-day-header .date_label")
+    );
     const headers = headerEls
       .map((el) => ({
         label: norm(el.textContent),
@@ -149,9 +155,11 @@ async function scrapeGrid(page) {
       }))
       .filter((h) => h.label && h.rect && h.rect.width > 0);
 
-    // row containers
+    // row containers (robust-ish across their variants)
     const rowEls = Array.from(
-      document.querySelectorAll(".schedule-row-item .grid-row-off, .schedule-row-item .schedule-row, .grid-row-off.schedule-row")
+      document.querySelectorAll(
+        ".schedule-row-item .grid-row-off, .schedule-row-item .schedule-row, .grid-row-off.schedule-row"
+      )
     );
 
     const rows = [];
@@ -202,7 +210,7 @@ async function scrapeGrid(page) {
       if (items.length) rows.push({ name, items });
     }
 
-    return { headers: headers.map(h => h.label), rows };
+    return { headers: headers.map((h) => h.label), rows };
   });
 }
 
@@ -221,7 +229,7 @@ function parseHoursAndType(text) {
   return { hours, type, raw: t };
 }
 
-function buildResultsForDate(grid, targetYmd) {
+export function buildResultsForDate(grid, targetYmd) {
   // Map each header label -> ymd
   const headerYmd = {};
   for (const lbl of grid.headers || []) {
@@ -237,14 +245,21 @@ function buildResultsForDate(grid, targetYmd) {
   const out = [];
   for (const r of grid.rows || []) {
     const hits = (r.items || [])
-      .filter(it => headerYmd[it.dayLabel] === targetYmd)
-      .map(it => parseHoursAndType(it.text))
-      .filter(x => x.hours && x.hours > 0);
+      .filter((it) => headerYmd[it.dayLabel] === targetYmd)
+      .map((it) => parseHoursAndType(it.text))
+      .filter((x) => x.hours && x.hours > 0);
 
     if (!hits.length) continue;
 
     // roll up hours by type
-    const totals = { PTO: 0, Sick: 0, Vacation: 0, Holiday: 0, "Time Off": 0, Out: 0 };
+    const totals = {
+      PTO: 0,
+      Sick: 0,
+      Vacation: 0,
+      Holiday: 0,
+      "Time Off": 0,
+      Out: 0,
+    };
     for (const h of hits) totals[h.type] = (totals[h.type] || 0) + h.hours;
 
     const totalHours = Object.values(totals).reduce((a, b) => a + b, 0);
@@ -253,20 +268,20 @@ function buildResultsForDate(grid, targetYmd) {
       name: r.name,
       hours: Math.round(totalHours * 100) / 100,
       breakdown: totals,
-      raw: hits.map(h => h.raw),
+      raw: hits.map((h) => h.raw),
     });
   }
 
   return out;
 }
 
-function filterSupportOnly(list) {
+export function filterSupportOnly(list) {
   const support = parseSupportNamesEnv();
   const allow = new Set(support.map(normalizeName));
-  return (list || []).filter(p => allow.has(normalizeName(p.name)));
+  return (list || []).filter((p) => allow.has(normalizeName(p.name)));
 }
 
-async function scrapeWhoIsOut(page, { artifactsDir = "artifacts" } = {}) {
+export async function scrapeWhoIsOut(page, { artifactsDir = "artifacts" } = {}) {
   const LOGIN_URL = "https://secure.timesheets.com/default.cfm?page=Login";
   const SCHEDULES_URL = "https://secure.timesheets.com/default.cfm?page=Schedules";
 
@@ -307,14 +322,18 @@ async function scrapeWhoIsOut(page, { artifactsDir = "artifacts" } = {}) {
   await page.waitForTimeout(800);
 
   // Wait for schedules area to exist (ANY of these)
-  await waitForAnyVisible(page, [
-    "text=Calendars & Schedules",
-    "text=Schedules",
-    ".tsWeek",
-    ".print-wrapper",
-    ".ts-schedule-table",
-    "table",
-  ], { timeout: 90000 });
+  await waitForAnyVisible(
+    page,
+    [
+      "text=Calendars & Schedules",
+      "text=Schedules",
+      ".tsWeek",
+      ".print-wrapper",
+      ".ts-schedule-table",
+      "table",
+    ],
+    { timeout: 90000 }
+  );
 
   await saveDebug(page, artifactsDir, "03-schedules-page");
 
@@ -336,7 +355,6 @@ async function scrapeWhoIsOut(page, { artifactsDir = "artifacts" } = {}) {
 
   // IMPORTANT: do NOT click Week tab (it can reset selection)
   // Instead, just wait for the grid to be stable.
-  // If a loading overlay appears, wait until it’s gone.
   const loading = page.locator("text=Loading...").first();
   if ((await loading.count().catch(() => 0)) > 0) {
     await loading.waitFor({ state: "hidden", timeout: 120000 }).catch(() => {});
@@ -344,19 +362,13 @@ async function scrapeWhoIsOut(page, { artifactsDir = "artifacts" } = {}) {
   await page.waitForTimeout(1200);
 
   // Ensure some row names exist
-  await waitForAnyVisible(page, [".name-ellipses", ".schedule-row-item", ".grid-row-off"], { timeout: 120000 });
+  await waitForAnyVisible(page, [".name-ellipses", ".schedule-row-item", ".grid-row-off"], {
+    timeout: 120000,
+  });
+
   await saveDebug(page, artifactsDir, "05-ready-to-scrape");
 
   const grid = await scrapeGrid(page);
 
-  return {
-    counter,
-    grid,
-  };
+  return { counter, grid };
 }
-
-module.exports = {
-  scrapeWhoIsOut,
-  buildResultsForDate,
-  filterSupportOnly,
-};
