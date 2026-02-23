@@ -1,17 +1,15 @@
-name: Daily Support Out (Tier2) — TEST CHANNEL ONLY
+name: Tier2 Daily (TEST CHANNEL)
 
 on:
   workflow_dispatch:
-    inputs:
-      date_ymd:
-        description: "yyyy-MM-dd (America/Denver)"
-        required: false
-        type: string
+  schedule:
+    # 8:00am MT during standard time? Adjust as needed.
+    # This is 15:00 UTC (depending on DST). You can change later.
+    - cron: "0 15 * * 1-5"
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
 
     steps:
       - name: Checkout
@@ -20,7 +18,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
 
       - name: Install dependencies (no lockfile required)
         run: npm install
@@ -29,14 +27,16 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run daily scraper (POSTS TO TEST CHANNEL ONLY)
-        run: npm run run:daily
         env:
-          DATE_YMD: ${{ inputs.date_ymd }}
+          DATE_YMD: ${{ github.event.inputs.date_ymd || '' }}
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
+
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID_TIER2: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
+          SLACK_CHANNEL_ID_TEST: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
+
           SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
+        run: npm run run:daily
 
       - name: Upload debug artifacts (screenshots/html)
         if: always()
@@ -44,3 +44,4 @@ jobs:
         with:
           name: timesheets-debug
           path: artifacts/*
+          if-no-files-found: ignore
