@@ -8,6 +8,6 @@
   },
   "dependencies": {
     "@slack/web-api": "^7.6.0",
-    "playwright": "^1.41.2"
+    "playwright": "^1.50.0"
   }
 }
