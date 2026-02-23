@@ -1,58 +1,77 @@
 // src/runDaily.js
-import { chromium } from "playwright";
-import { scrapeWhoIsOut, buildResultsForDate, filterSupportOnly } from "./scrapeTimesheets.js";
-import { postSlackMessage } from "./slack.js";
+import { scrapeWhoIsOutToday } from "./scrapeTimesheets.js";
+import { postToSlack } from "./slack.js";
 
-function fmtHours(n) {
-  const x = Math.round((Number(n) || 0) * 100) / 100;
-  return String(x).replace(/\.00$/, "").replace(/(\.\d)0$/, "$1");
+function mustEnv(name) {
+  const v = process.env[name];
+  if (!v || !String(v).trim()) return null;
+  return String(v).trim();
 }
 
-function buildTier2Message(list) {
-  if (!list.length) return null;
-
-  const parts = list.map((p) => {
-    if (p.hours >= 7.99) return `${p.name} is out today`;
-    return `${p.name} is out ${fmtHours(p.hours)} hours today`;
-  });
-
-  if (parts.length === 1) return `@channel ${parts[0]}.`;
-  if (parts.length === 2) return `@channel ${parts[0]}, and ${parts[1]}.`;
-  return `@channel ${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}.`;
+function parseSupportNames(raw) {
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 async function main() {
-  const artifactsDir = "artifacts";
-  const ymd = process.env.DATE_YMD;
-  if (!ymd) throw new Error("Missing DATE_YMD env var (yyyy-mm-dd).");
+  const TS_USERNAME = mustEnv("TS_USERNAME");
+  const TS_PASSWORD = mustEnv("TS_PASSWORD");
 
-  const slackToken = process.env.SLACK_BOT_TOKEN;
-  const slackChannel = process.env.SLACK_CHANNEL_ID_TEST; // ALWAYS TEST CHANNEL
-  if (!slackToken || !slackChannel) throw new Error("Missing SLACK_BOT_TOKEN or SLACK_CHANNEL_ID_TEST.");
+  const SLACK_BOT_TOKEN = mustEnv("SLACK_BOT_TOKEN");
+  const SLACK_CHANNEL_ID_TEST = mustEnv("SLACK_CHANNEL_ID_TEST");
 
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
+  const SUPPORT_TEAM_NAMES = parseSupportNames(mustEnv("SUPPORT_TEAM_NAMES"));
 
-  try {
-    const { counter, grid } = await scrapeWhoIsOut(page, { artifactsDir });
-
-    const allOut = buildResultsForDate(grid, ymd);
-    const supportOut = filterSupportOnly(allOut);
-
-    const msg = buildTier2Message(supportOut);
-
-    const header =
-      `*TEST DAILY* (${ymd}) | Selected ${counter.selected}/${counter.total}\n` +
-      (msg ? msg : "_No support team members marked out today._");
-
-    await postSlackMessage({ token: slackToken, channel: slackChannel, text: header });
-  } finally {
-    await page.close().catch(() => {});
-    await browser.close().catch(() => {});
+  if (!TS_USERNAME || !TS_PASSWORD) {
+    throw new Error("RUN ERROR: Missing TS_USERNAME or TS_PASSWORD.");
   }
+  if (!SLACK_BOT_TOKEN || !SLACK_CHANNEL_ID_TEST) {
+    throw new Error("RUN ERROR: Missing SLACK_BOT_TOKEN or SLACK_CHANNEL_ID_TEST.");
+  }
+  if (!SUPPORT_TEAM_NAMES.length) {
+    throw new Error("RUN ERROR: SUPPORT_TEAM_NAMES is empty. Provide comma-separated names.");
+  }
+
+  const dateYmd = (process.env.DATE_YMD || "").trim() || null;
+
+  const result = await scrapeWhoIsOutToday({
+    username: TS_USERNAME,
+    password: TS_PASSWORD,
+    supportNames: SUPPORT_TEAM_NAMES,
+    dateYmd,
+  });
+
+  // Build message
+  const lines = [];
+  lines.push(`*TEST (Tier2 | Who is out today)*`);
+  lines.push(`Date: ${result.dateLabel}`);
+  lines.push("");
+
+  if (!result.entries.length) {
+    lines.push("Nobody is marked out today.");
+  } else {
+    for (const e of result.entries) {
+      // e: { name, type, hours, approved }
+      const approvedTxt = e.approved === true ? "Approved" : e.approved === false ? "Unapproved" : "Unknown";
+      const hoursTxt = e.hours ? `${e.hours}h` : "";
+      const typeTxt = e.type || "Time Off";
+      lines.push(`• *${e.name}* — ${hoursTxt} (${typeTxt}) — ${approvedTxt}`.replace(" —  ", " — "));
+    }
+  }
+
+  await postToSlack({
+    token: SLACK_BOT_TOKEN,
+    channel: SLACK_CHANNEL_ID_TEST,
+    text: lines.join("\n"),
+  });
+
+  console.log("Posted to Slack test channel:", SLACK_CHANNEL_ID_TEST);
 }
 
-main().catch((e) => {
-  console.error("RUN ERROR:", e);
+main().catch((err) => {
+  console.error(err?.stack || err?.message || err);
   process.exit(1);
 });
