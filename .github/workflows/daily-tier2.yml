@@ -1,11 +1,14 @@
-name: Tier2 Daily (TEST CHANNEL)
+name: Daily Tier2 (TEST)
 
 on:
   workflow_dispatch:
+    inputs:
+      date_ymd:
+        description: "Optional date YYYY-MM-DD (leave blank for today)"
+        required: false
+        default: ""
   schedule:
-    # 8:00am MT during standard time? Adjust as needed.
-    # This is 15:00 UTC (depending on DST). You can change later.
-    - cron: "0 15 * * 1-5"
+    - cron: "0 15 * * 1-5" # 8am Mountain during standard time; adjust later if needed
 
 jobs:
   run:
@@ -28,13 +31,11 @@ jobs:
 
       - name: Run daily scraper (POSTS TO TEST CHANNEL ONLY)
         env:
-          DATE_YMD: ${{ github.event.inputs.date_ymd || '' }}
+          DATE_YMD: ${{ inputs.date_ymd }}
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
-
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID_TEST: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
-
+          SLACK_CHANNEL_ID_TARGET: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
           SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
         run: npm run run:daily
 
@@ -44,4 +45,3 @@ jobs:
         with:
           name: timesheets-debug
           path: artifacts/*
-          if-no-files-found: ignore
