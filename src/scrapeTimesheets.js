@@ -2,282 +2,290 @@
 import fs from "fs";
 import path from "path";
 
-function ensureDir(dir) {
+/**
+ * Debug artifacts
+ */
+async function saveArtifacts(page, name) {
+  const dir = path.resolve("artifacts");
   fs.mkdirSync(dir, { recursive: true });
-}
 
-async function saveDebug(page, artifactsDir, name) {
-  ensureDir(artifactsDir);
-  await page.screenshot({ path: path.join(artifactsDir, `${name}.png`), fullPage: true });
-  const html = await page.content();
-  fs.writeFileSync(path.join(artifactsDir, `${name}.html`), html, "utf8");
+  const pngPath = path.join(dir, `${name}.png`);
+  const htmlPath = path.join(dir, `${name}.html`);
+
+  await page.screenshot({ path: pngPath, fullPage: true });
+  fs.writeFileSync(htmlPath, await page.content(), "utf8");
+
   console.log(`Saved screenshot: artifacts/${name}.png`);
   console.log(`Saved HTML: artifacts/${name}.html`);
 }
 
+function norm(s) {
+  return (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 function parseSupportNames(envVal) {
-  // Expected: "Andrew Graff, Melissa Zurun, Dillon Janes" etc
-  // We match case-insensitive and allow exact match or "Last, First" etc.
-  const raw = (envVal || "").split(",").map(s => s.trim()).filter(Boolean);
-  const set = new Set(raw.map(s => s.toLowerCase()));
-  return { raw, set };
+  if (!envVal) return [];
+  return envVal
+    .split(/[\n,]/g)
+    .map((s) => norm(s))
+    .filter(Boolean);
 }
 
-function normalizeName(s) {
-  return (s || "").replace(/\s+/g, " ").trim();
+function isSupportName(fullName, supportNames) {
+  const n = norm(fullName);
+  return supportNames.some((sn) => n === sn || n.includes(sn));
 }
 
-function ymdInTimeZone(date = new Date(), timeZone = "America/Denver") {
-  const parts = new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).formatToParts(date);
-  const obj = Object.fromEntries(parts.map(p => [p.type, p.value]));
-  return `${obj.year}-${obj.month}-${obj.day}`; // YYYY-MM-DD
+async function safeClick(locator) {
+  await locator.scrollIntoViewIfNeeded().catch(() => {});
+  await locator.click({ timeout: 60000 });
 }
 
-function tryParseHeaderToYMD(label) {
-  // Example label: "Feb 25, 2026"
-  // We'll parse via Date. This assumes English month names (it is, for your UI).
-  const d = new Date(label);
-  if (Number.isNaN(d.getTime())) return null;
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+/**
+ * Wait until the schedule grid exists
+ */
+async function waitForScheduleGrid(page) {
+  // These are stable “big container” anchors in your markup/screenshots
+  const grid = page.locator(".print-wrapper, .ts-schedule, .ts-schedule-table, .tsWeek").first();
+  await grid.waitFor({ state: "visible", timeout: 90000 });
 }
 
-async function clickIfVisible(locator) {
-  try {
-    if (await locator.first().isVisible({ timeout: 1500 })) {
-      await locator.first().click();
-      return true;
-    }
-  } catch {}
-  return false;
-}
+/**
+ * After Update, the UI sometimes shows "39 / 39" and sometimes "100%".
+ * Your current code was waiting ONLY for X / X, but your logs show it often sits at "100%".
+ * We accept BOTH as success.
+ */
+async function waitForUpdateComplete(page) {
+  const counter = page.locator("span.float-right").first(); // you gave this exact selector target
 
-async function waitForSelectionCounter(page, { timeoutMs = 90000 } = {}) {
-  // Counter element you gave:
-  // #app > div > div.menu-link.no-print.wide-counter-layout > span > div > span.float-right
-  const counter = page.locator("span.float-right").first();
-
+  const timeoutMs = 120000;
   const start = Date.now();
-  let lastText = "";
+  let lastSeen = "";
 
   while (Date.now() - start < timeoutMs) {
-    try {
-      const txt = normalizeName(await counter.textContent());
-      if (txt) lastText = txt;
+    const txt = ((await counter.innerText().catch(() => "")) || "").trim();
+    if (txt) lastSeen = txt;
 
-      // Expect format "39 / 39" or "0 / 39"
-      const m = txt.match(/(\d+)\s*\/\s*(\d+)/);
-      if (m) {
-        const left = Number(m[1]);
-        const right = Number(m[2]);
+    // Good states:
+    // - "39 / 39" (or any N / N, or N / M) as long as it's not 0/0
+    // - "100%"
+    if (txt === "100%") return { ok: true, value: txt };
+    if (/^\d+\s*\/\s*\d+$/.test(txt) && txt !== "0 / 0") return { ok: true, value: txt };
 
-        // We want it to be non-zero and fully loaded.
-        // In practice, when Update finishes, you get 39/39.
-        if (right > 0 && left === right) {
-          return { left, right, txt };
-        }
-      }
-    } catch {}
-
-    await page.waitForTimeout(750);
+    await page.waitForTimeout(500);
   }
 
-  throw new Error(`Timed out waiting for selection counter to reach X / X after Update. Last seen: "${lastText}"`);
+  throw new Error(`Timed out waiting for selection counter after Update. Last seen: "${lastSeen}"`);
 }
 
-async function waitForGridReady(page, { timeoutMs = 90000 } = {}) {
-  // Things that reliably exist on the week grid
-  const grid = page.locator(".ts-schedule.wrapperBox, .print-wrapper, .tsWeek, .ts-schedule-table").first();
-  await grid.waitFor({ state: "visible", timeout: timeoutMs });
-}
+/**
+ * Opens Schedules, Select All, Update, waits until done.
+ * Uses the selectors YOU pasted (tour-BTS-Users, select-all, update-menu-item, etc.)
+ */
+async function openSchedulesSelectAllUpdate(page) {
+  // Go straight to schedules page (no sidebar clicking needed)
+  await page.goto("https://secure.timesheets.com/default.cfm?page=Schedules", {
+    waitUntil: "domcontentloaded",
+    timeout: 90000,
+  });
 
-async function gotoSchedules(page) {
-  // You gave:
-  // Scheduling dropdown handler: a.dropdown-handler.tour-Scheduling
-  // Schedules link: a[href="default.cfm?page=Schedules"]
-  await page.locator("a.dropdown-handler.tour-Scheduling").first().click({ timeout: 30000 });
-  await page.locator('a[href="default.cfm?page=Schedules"]').first().click({ timeout: 30000 });
-}
+  await waitForScheduleGrid(page);
+  await saveArtifacts(page, "03-on-schedules");
 
-async function openPeopleMenu(page) {
-  // You gave a very specific CSS path; we'll use a stable class-based selector:
-  // i.fa-users-medical.open-menu
-  const icon = page.locator("i.open-menu.fa-users-medical, i.open-menu.fa-users-medical-pos").first();
-  await icon.waitFor({ state: "visible", timeout: 30000 });
-  await icon.click();
-}
+  // People icon (you gave outerHTML with these classes)
+  const peopleIcon = page.locator("i.open-menu.tour-BTS-Users, i.fa-users-medical-pos.open-menu").first();
+  await peopleIcon.waitFor({ state: "visible", timeout: 60000 });
+  await safeClick(peopleIcon);
 
-async function selectAllInMenu(page) {
-  // You gave selector for the span.checkmark.select-all; clicking that is fine.
+  // Select All checkbox (your selector: span.checkmark.cb-container-category.select-all)
   const selectAll = page.locator("span.checkmark.cb-container-category.select-all").first();
-  await selectAll.waitFor({ state: "visible", timeout: 30000 });
-  await selectAll.click();
-}
+  await selectAll.waitFor({ state: "visible", timeout: 60000 });
+  await safeClick(selectAll);
 
-async function clickUpdate(page) {
+  // Update button (your selector: div.menu-link-item.update-menu-item.indent-1.tour-BTS-Update)
   const updateBtn = page.locator("div.menu-link-item.update-menu-item").first();
-  await updateBtn.waitFor({ state: "visible", timeout: 30000 });
-  await updateBtn.click();
+  await updateBtn.waitFor({ state: "visible", timeout: 60000 });
+  await safeClick(updateBtn);
+
+  // Wait for completion (accepts 39/39 OR 100%)
+  const done = await waitForUpdateComplete(page);
+
+  await saveArtifacts(page, "04-after-update");
+  return done.value;
 }
 
-async function login(page, { username, password }) {
-  await page.goto("https://secure.timesheets.com/default.cfm?page=Login", { waitUntil: "domcontentloaded" });
-
-  await page.locator("#username").fill(username);
-  await page.locator("#password").fill(password);
-  await page.locator('button[type="submit"].loginButton').click();
-
-  // Wait for post-login UI: left nav exists
-  await page.locator("text=Dashboard").first().waitFor({ state: "visible", timeout: 30000 });
-}
-
+/**
+ * Get the header dates in order (Sun..Sat) so we can map today's date to a column index.
+ * Your markup shows .grid-day-header .date_label
+ */
 async function getHeaderDates(page) {
-  // In your DOM: .date_label (inside grid-day-header)
-  const labels = page.locator(".date_label");
+  const labels = page.locator(".grid-day-header .date_label");
   const count = await labels.count();
   const out = [];
   for (let i = 0; i < count; i++) {
-    const txt = normalizeName(await labels.nth(i).textContent());
-    const ymd = tryParseHeaderToYMD(txt);
-    if (ymd) out.push({ index: i, label: txt, ymd });
+    out.push(((await labels.nth(i).innerText().catch(() => "")) || "").trim());
   }
-  return out;
+  return out; // ["Feb 22, 2026", ...]
 }
 
-async function scrapeDayColumn(page, targetYmd, supportSet) {
-  // Rows: .schedule-row-item exists; inside name container we’ve seen:
-  // .name-ellipses OR .calendar-name-sched (from your DOM snippets)
-  const rows = page.locator(".schedule-row-item");
+function ymdToDate(ymd) {
+  // ymd like 2026-02-20
+  const [y, m, d] = ymd.split("-").map((x) => parseInt(x, 10));
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+function sameUtcDay(a, b) {
+  return (
+    a.getUTCFullYear() === b.getUTCFullYear() &&
+    a.getUTCMonth() === b.getUTCMonth() &&
+    a.getUTCDate() === b.getUTCDate()
+  );
+}
+
+function headerLabelToDate(label) {
+  // label like "Feb 25, 2026"
+  const t = Date.parse(label);
+  if (Number.isNaN(t)) return null;
+  const d = new Date(t);
+  // normalize to UTC day
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+}
+
+/**
+ * Extract time off blocks from the weekly grid using the actual grid structure:
+ * - each row has the name
+ * - each day cell is .grid-day[data-day-index="0..6"]
+ * - time off blocks live under .timeOff and include text like "8.00 PTO" / "4.00 Sick"
+ */
+async function extractTimeOffFromGrid(page) {
+  const rows = page.locator(".schedule-row-item .grid-row-off, .schedule-row-item .schedule_row");
   const rowCount = await rows.count();
 
-  // Header dates to map column index
-  const headerDates = await getHeaderDates(page);
-  const target = headerDates.find(d => d.ymd === targetYmd);
-
-  if (!target) {
-    return {
-      targetYmd,
-      found: [],
-      meta: { error: `Could not find target date column header for ${targetYmd}`, headerDates },
-    };
-  }
-
-  const dayIndex = target.index; // 0..6-ish depending on layout
-  const found = [];
+  const results = [];
 
   for (let r = 0; r < rowCount; r++) {
     const row = rows.nth(r);
 
-    const name =
-      normalizeName(await row.locator(".name-ellipses").first().textContent().catch(() => "")) ||
-      normalizeName(await row.locator(".calendar-name-sched").first().textContent().catch(() => ""));
-
+    const name = ((await row.locator(".name-ellipses").first().innerText().catch(() => "")) || "").trim();
     if (!name) continue;
 
-    // Filter to support only
-    const nameLower = name.toLowerCase();
-    let isSupport = false;
+    // For each day column 0..6, check if there is a timeOff block
+    for (let dayIdx = 0; dayIdx <= 6; dayIdx++) {
+      const dayCell = row.locator(`.grid-day[data-day-index="${dayIdx}"]`).first();
+      if (!(await dayCell.count())) continue;
 
-    // exact match on known names
-    if (supportSet.size > 0) {
-      for (const s of supportSet) {
-        if (s && (nameLower === s || nameLower.includes(s))) {
-          isSupport = true;
-          break;
-        }
-      }
-      if (!isSupport) continue;
-    }
+      const timeOffBlock = dayCell.locator(".timeOff, .default.schedule-item").first();
+      if (!(await timeOffBlock.count())) continue;
 
-    // The day cell container in your snippet uses data-day-index on .grid-day elements.
-    // We'll find the cell for this row for the given day index.
-    const cell = row.locator(`.grid-day[data-day-index="${dayIndex}"], .grid-day-flex-cell[data-day-index="${dayIndex}"]`).first();
+      const txt = ((await timeOffBlock.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
+      if (!txt) continue;
 
-    const hasEvent = await cell.locator(".has-event, .timeOff").first().isVisible().catch(() => false);
-    if (!hasEvent) continue;
+      // We only care about Time Off types (PTO/Sick/Time Off)
+      if (!/pto|sick|time off/i.test(txt)) continue;
 
-    // Events blocks
-    const events = cell.locator(".default.schedule-item, .timeOff, .has-event");
-    const eventCount = await events.count();
-
-    for (let e = 0; e < eventCount; e++) {
-      const ev = events.nth(e);
-
-      const cls = (await ev.getAttribute("class").catch(() => "")) || "";
-      const approved = !cls.toLowerCase().includes("unpublished");
-
-      const text = normalizeName(await ev.textContent().catch(() => ""));
-      // Usually contains "8.00 PTO" or "4.00 Sick"
-      const m = text.match(/(\d+(?:\.\d+)?)\s*(PTO|Sick|Unavailable|Time Off)/i);
-      const hours = m ? Number(m[1]) : null;
-      const type = m ? m[2].toUpperCase() : text;
-
-      found.push({
+      results.push({
         name,
-        date: targetYmd,
-        type,
-        hours,
-        approved,
-        raw: text,
+        dayIdx,
+        raw: txt,
       });
     }
   }
 
-  return { targetYmd, dayIndex, found, meta: { headerDates } };
+  return results;
 }
 
+/**
+ * LOGIN
+ */
+async function login(page, username, password) {
+  await page.goto("https://secure.timesheets.com/default.cfm?page=Login", {
+    waitUntil: "domcontentloaded",
+    timeout: 90000,
+  });
+
+  await page.locator("#username").fill(username, { timeout: 60000 });
+  await page.locator("#password").fill(password, { timeout: 60000 });
+  await saveArtifacts(page, "01-login-page");
+
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 90000 }).catch(() => {}),
+    page.locator('button.loginButton[type="submit"]').click({ timeout: 60000 }),
+  ]);
+
+  await saveArtifacts(page, "02-after-login");
+}
+
+/**
+ * DAILY: return only people out on DATE_YMD (env passed by workflow)
+ */
 export async function scrapeWhoIsOutToday(page, opts) {
-  const {
-    username,
-    password,
-    supportTeamNames,
-    artifactsDir = "artifacts",
-    targetYmd,
-  } = opts;
+  const { tsUsername, tsPassword, dateYmd, supportTeamNames } = opts;
+  const supportNames = parseSupportNames(supportTeamNames);
 
-  const { set: supportSet } = parseSupportNames(supportTeamNames);
+  await login(page, tsUsername, tsPassword);
 
-  try {
-    await login(page, { username, password });
-    await saveDebug(page, artifactsDir, "02-after-login");
+  // Select all + update and wait until done (39/39 OR 100%)
+  const status = await openSchedulesSelectAllUpdate(page);
+  console.log(`Selection status after Update: ${status}`);
 
-    await gotoSchedules(page);
+  await waitForScheduleGrid(page);
 
-    // Wait for schedules UI to appear
-    await page.locator("text=Calendars & Schedules").first().waitFor({ state: "visible", timeout: 45000 });
-
-    await openPeopleMenu(page);
-    await selectAllInMenu(page);
-    await clickUpdate(page);
-
-    // Big important waits
-    await waitForGridReady(page, { timeoutMs: 90000 });
-    const counter = await waitForSelectionCounter(page, { timeoutMs: 90000 });
-    console.log(`Selection counter ready: ${counter.txt}`);
-
-    await saveDebug(page, artifactsDir, "04-after-update");
-
-    // DO NOT click "Week" tab — you’re already in the weekly grid view after update.
-    const effectiveYmd = targetYmd || ymdInTimeZone(new Date(), "America/Denver");
-
-    const dayResult = await scrapeDayColumn(page, effectiveYmd, supportSet);
-    await saveDebug(page, artifactsDir, "06-after-scrape");
-
-    return {
-      mode: "daily",
-      selectionCounter: counter,
-      ...dayResult,
-    };
-  } catch (err) {
-    console.log("SCRAPE ERROR:", err?.message || err);
-    await saveDebug(page, artifactsDir, "99-error");
-    throw err;
+  const headerDates = await getHeaderDates(page);
+  if (!headerDates.length) {
+    await saveArtifacts(page, "99-error");
+    throw new Error("Could not find header dates (.grid-day-header .date_label).");
   }
+
+  const target = ymdToDate(dateYmd);
+  const headerParsed = headerDates.map(headerLabelToDate);
+
+  const targetIdx = headerParsed.findIndex((d) => d && sameUtcDay(d, target));
+  if (targetIdx === -1) {
+    // Not in this visible week (or header parse failed)
+    console.log("Header dates:", headerDates);
+    await saveArtifacts(page, "99-error");
+    throw new Error(`Target date ${dateYmd} not found in visible week header.`);
+  }
+
+  const allBlocks = await extractTimeOffFromGrid(page);
+
+  // filter to the target day
+  const todayBlocks = allBlocks.filter((b) => b.dayIdx === targetIdx);
+
+  // filter support-only
+  const supportOnly = todayBlocks.filter((b) => isSupportName(b.name, supportNames));
+
+  return {
+    dateYmd,
+    targetIdx,
+    headerLabel: headerDates[targetIdx],
+    supportOnly,
+    allToday: todayBlocks,
+  };
+}
+
+/**
+ * WEEKLY: return support-only time off blocks for the whole visible week
+ * (Used by weekly-leads job)
+ */
+export async function scrapeWhoIsOutThisWeek(page, opts) {
+  const { tsUsername, tsPassword, supportTeamNames } = opts;
+  const supportNames = parseSupportNames(supportTeamNames);
+
+  await login(page, tsUsername, tsPassword);
+
+  const status = await openSchedulesSelectAllUpdate(page);
+  console.log(`Selection status after Update: ${status}`);
+
+  await waitForScheduleGrid(page);
+
+  const headerDates = await getHeaderDates(page);
+  const allBlocks = await extractTimeOffFromGrid(page);
+
+  const supportOnly = allBlocks.filter((b) => isSupportName(b.name, supportNames));
+
+  return {
+    headerDates,
+    supportOnly,
+  };
 }
