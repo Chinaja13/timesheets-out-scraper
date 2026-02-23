@@ -1,16 +1,14 @@
-name: Weekly Support Overview (Leads) — TEST CHANNEL ONLY
+name: Weekly Leads (TEST CHANNEL)
 
 on:
+  workflow_dispatch:
   schedule:
-    # 6am America/Denver ≈ 13:00 UTC in winter (MST), 12:00 UTC in summer (MDT).
-    # Keeping 13:00 UTC for now.
-    - cron: "0 13 * * 1"
-  workflow_dispatch: {}
+    # Mondays
+    - cron: "0 16 * * 1"
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -19,7 +17,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: "20"
 
       - name: Install dependencies (no lockfile required)
         run: npm install
@@ -27,15 +25,22 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run weekly (posts to TEST channel only)
-        run: npm run run:weekly
+      - name: Run weekly scraper (POSTS TO TEST CHANNEL ONLY)
         env:
+          WEEK_START_YMD: ${{ github.event.inputs.week_start_ymd || '' }}
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
+
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID_TEST: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
 
-          # ✅ FORCE weekly output to your TEST channel
-          SLACK_CHANNEL_ID_LEADS: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
-
-          # Optional: filter to only your support team names (comma-separated) via secrets
           SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
+        run: npm run run:weekly
+
+      - name: Upload debug artifacts (screenshots/html)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: timesheets-weekly-debug
+          path: artifacts/*
+          if-no-files-found: ignore
