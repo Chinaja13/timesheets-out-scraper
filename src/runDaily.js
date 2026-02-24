@@ -14,11 +14,11 @@ function formatDailyMessage(items, dateYmd) {
     return `TEST (Support | Out Today) (${dateYmd})\nNobody is marked out today.`;
   }
 
-  // One line per person
-  const lines = items.map(i => {
+  const lines = items.map((i) => {
     const hrs = i.hours != null ? `${i.hours}h` : "";
-    const appr = i.approved ? "" : " (UNAPPROVED)";
-    return `${i.name} — ${hrs} ${i.type}${appr}`.replace(/\s+/g, " ").trim();
+    const appr = i.approved === false ? " (UNAPPROVED)" : "";
+    const type = i.type || "Time Off";
+    return `${i.name} — ${hrs} ${type}${appr}`.replace(/\s+/g, " ").trim();
   });
 
   return `TEST (Support | Out Today) (${dateYmd})\n` + lines.join("\n");
@@ -27,25 +27,26 @@ function formatDailyMessage(items, dateYmd) {
 async function main() {
   const TS_USERNAME = required("TS_USERNAME");
   const TS_PASSWORD = required("TS_PASSWORD");
-  const SLACK_BOT_TOKEN = required("SLACK_BOT_TOKEN");
-  const SLACK_CHANNEL_ID_TARGET = required("SLACK_CHANNEL_ID_TARGET"); // always set by workflow
-  const SUPPORT_TEAM_NAMES = process.env.SUPPORT_TEAM_NAMES || "";
-  const DATE_YMD = process.env.DATE_YMD || ""; // optional
 
-  const browser = await chromium.launch();
-  const page = await browser.newPage();
+  const SLACK_BOT_TOKEN = required("SLACK_BOT_TOKEN");
+  const SLACK_CHANNEL_ID_TARGET = required("SLACK_CHANNEL_ID_TARGET");
+
+  const SUPPORT_TEAM_NAMES = required("SUPPORT_TEAM_NAMES");
+  const DATE_YMD = (process.env.DATE_YMD || "").trim(); // optional
+
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
 
   try {
     const result = await scrapeWhoIsOutToday(page, {
-      username: TS_USERNAME,
-      password: TS_PASSWORD,
+      // ✅ These key names MUST match scrapeTimesheets.js
+      tsUsername: TS_USERNAME,
+      tsPassword: TS_PASSWORD,
+      dateYmd: DATE_YMD || undefined,
       supportTeamNames: SUPPORT_TEAM_NAMES,
-      artifactsDir: "artifacts",
-      targetYmd: DATE_YMD || undefined,
     });
 
-    const dateYmd = result.targetYmd || DATE_YMD || "unknown-date";
-    const msg = formatDailyMessage(result.found, dateYmd);
+    const msg = formatDailyMessage(result.supportOnly ?? result.found ?? [], result.dateYmd || DATE_YMD || "today");
 
     await postToSlack({
       token: SLACK_BOT_TOKEN,
@@ -55,7 +56,8 @@ async function main() {
 
     console.log("Posted to Slack OK.");
   } finally {
-    await browser.close();
+    await page.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
 }
 
