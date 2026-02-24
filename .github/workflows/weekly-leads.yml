@@ -1,10 +1,9 @@
-name: Weekly Leads (TEST CHANNEL)
+name: Leads Weekly (PROD)
 
 on:
   workflow_dispatch:
   schedule:
-    # Mondays
-    - cron: "0 16 * * 1"
+    - cron: "0 2 * * 1" # Sunday 7:00 PM MST (UTC-7) == Monday 02:00 UTC
 
 jobs:
   run:
@@ -25,13 +24,13 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run weekly scraper (POSTS TO TEST CHANNEL ONLY)
+      - name: Run Leads weekly
         env:
-          WEEK_START_YMD: ${{ github.event.inputs.week_start_ymd || '' }}
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
 
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID_LEADS: ${{ secrets.SLACK_CHANNEL_ID_LEADS }}
           SLACK_CHANNEL_ID_TEST: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
 
           SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
@@ -41,6 +40,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: timesheets-weekly-debug
+          name: timesheets-leads-debug
           path: artifacts/*
           if-no-files-found: ignore
