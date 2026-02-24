@@ -1,14 +1,9 @@
-name: Daily Tier2 (TEST)
+name: Tier2 Daily (TEST CHANNEL ONLY)
 
 on:
   workflow_dispatch:
-    inputs:
-      date_ymd:
-        description: "Optional date YYYY-MM-DD (leave blank for today)"
-        required: false
-        default: ""
   schedule:
-    - cron: "0 15 * * 1-5" # 8am Mountain during standard time; adjust later if needed
+    - cron: "0 15 * * 1-5" # 8:00am Mountain-ish (adjust later)
 
 jobs:
   run:
@@ -29,15 +24,23 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
+      # IMPORTANT: export env vars EXACTLY as the code uses them
       - name: Run daily scraper (POSTS TO TEST CHANNEL ONLY)
         env:
-          DATE_YMD: ${{ inputs.date_ymd }}
+          DATE_YMD: ${{ github.event.inputs.date_ymd || '' }}
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-          SLACK_CHANNEL_ID_TARGET: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
+          SLACK_CHANNEL_ID_TEST: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
           SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
-        run: npm run run:daily
+        run: |
+          echo "DATE_YMD=$DATE_YMD"
+          echo "TS_USERNAME is set? $([[ -n "$TS_USERNAME" ]] && echo yes || echo no)"
+          echo "TS_PASSWORD is set? $([[ -n "$TS_PASSWORD" ]] && echo yes || echo no)"
+          echo "SLACK_BOT_TOKEN is set? $([[ -n "$SLACK_BOT_TOKEN" ]] && echo yes || echo no)"
+          echo "SLACK_CHANNEL_ID_TEST is set? $([[ -n "$SLACK_CHANNEL_ID_TEST" ]] && echo yes || echo no)"
+          echo "SUPPORT_TEAM_NAMES is set? $([[ -n "$SUPPORT_TEAM_NAMES" ]] && echo yes || echo no)"
+          npm run run:daily
 
       - name: Upload debug artifacts (screenshots/html)
         if: always()
@@ -45,3 +48,4 @@ jobs:
         with:
           name: timesheets-debug
           path: artifacts/*
+          if-no-files-found: ignore
