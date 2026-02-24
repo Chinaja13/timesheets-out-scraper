@@ -43,7 +43,7 @@ async function main() {
       tsUsername: TS_USERNAME,
       tsPassword: TS_PASSWORD,
       dateYmd: DATE_YMD || undefined,
-      supportTeamNames: SUPPORT_TEAM_NAMES,
+      supportTeamNames: (SUPPORT_TEAM_NAMES || "").trim()
     });
 
     const msg = formatDailyMessage(result.supportOnly ?? result.found ?? [], result.dateYmd || DATE_YMD || "today");
