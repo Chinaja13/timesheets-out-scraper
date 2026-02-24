@@ -24,10 +24,11 @@ function norm(s) {
 }
 
 function parseSupportNames(envVal) {
-  if (!envVal) return [];
-  return envVal
+  // Never crash if the caller passes undefined/null/non-string
+  const s = (envVal == null) ? "" : String(envVal);
+  return s
     .split(/[\n,]/g)
-    .map((s) => norm(s))
+    .map((x) => norm(x))
     .filter(Boolean);
 }
 
