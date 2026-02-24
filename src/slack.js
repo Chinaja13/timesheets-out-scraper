@@ -12,9 +12,9 @@ export async function postToSlack({ token, channel, text }) {
     body: JSON.stringify({ channel, text }),
   });
 
-  const data = await res.json();
-  if (!data.ok) {
-    throw new Error(`Slack API error: ${data.error || "unknown_error"}`);
+  const data = await res.json().catch(() => null);
+  if (!data || data.ok !== true) {
+    throw new Error(`Slack API error: ${data?.error || "unknown_error"}`);
   }
   return data;
 }
