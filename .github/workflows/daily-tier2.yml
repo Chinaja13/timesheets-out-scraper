@@ -1,9 +1,14 @@
-name: Tier2 Daily (TEST CHANNEL ONLY)
+name: Tier2 Daily (PROD)
 
 on:
   workflow_dispatch:
+    inputs:
+      date_ymd:
+        description: "Optional YYYY-MM-DD (leave blank for today)"
+        required: false
+        default: ""
   schedule:
-    - cron: "0 15 * * 1-5"
+    - cron: "0 12 * * 1-5" # 5:00 AM MST (UTC-7) Mon-Fri
 
 jobs:
   run:
@@ -24,35 +29,24 @@ jobs:
       - name: Install Playwright Chromium
         run: npx playwright install --with-deps chromium
 
-      - name: Run daily scraper (POSTS TO TEST CHANNEL ONLY)
+      - name: Run Tier2 daily
         env:
-          # If blank, code should default to "today" (or you can set it later)
-          DATE_YMD: "2026-02-26"
+          DATE_YMD: ${{ inputs.date_ymd }}
 
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
 
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
-
-          # ✅ THIS is what your code is asking for
-          SLACK_CHANNEL_ID_TARGET: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
-
-          # Keep these too (harmless, and useful later)
+          SLACK_CHANNEL_ID_TIER2: ${{ secrets.SLACK_CHANNEL_ID_TIER2 }}
           SLACK_CHANNEL_ID_TEST: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
+
           SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
-        run: |
-          echo "DATE_YMD=$DATE_YMD"
-          echo "TS_USERNAME is set? $([[ -n "$TS_USERNAME" ]] && echo yes || echo no)"
-          echo "TS_PASSWORD is set? $([[ -n "$TS_PASSWORD" ]] && echo yes || echo no)"
-          echo "SLACK_BOT_TOKEN is set? $([[ -n "$SLACK_BOT_TOKEN" ]] && echo yes || echo no)"
-          echo "SLACK_CHANNEL_ID_TARGET is set? $([[ -n "$SLACK_CHANNEL_ID_TARGET" ]] && echo yes || echo no)"
-          echo "SUPPORT_TEAM_NAMES is set? $([[ -n "$SUPPORT_TEAM_NAMES" ]] && echo yes || echo no)"
-          npm run run:daily
+        run: npm run run:daily
 
       - name: Upload debug artifacts (screenshots/html)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: timesheets-debug
+          name: timesheets-tier2-debug
           path: artifacts/*
           if-no-files-found: ignore
