@@ -27,7 +27,7 @@ jobs:
       - name: Run daily scraper (POSTS TO TEST CHANNEL ONLY)
         env:
           # If blank, code should default to "today" (or you can set it later)
-          DATE_YMD: ""
+          DATE_YMD: "2026-02-26"
 
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
