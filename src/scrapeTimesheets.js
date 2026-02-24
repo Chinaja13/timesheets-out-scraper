@@ -2,9 +2,6 @@
 import fs from "fs";
 import path from "path";
 
-/**
- * Debug artifacts
- */
 async function saveArtifacts(page, name) {
   const dir = path.resolve("artifacts");
   fs.mkdirSync(dir, { recursive: true });
@@ -24,8 +21,7 @@ function norm(s) {
 }
 
 function parseSupportNames(envVal) {
-  // Never crash if the caller passes undefined/null/non-string
-  const s = (envVal == null) ? "" : String(envVal);
+  const s = envVal == null ? "" : String(envVal);
   return s
     .split(/[\n,]/g)
     .map((x) => norm(x))
@@ -42,22 +38,87 @@ async function safeClick(locator) {
   await locator.click({ timeout: 60000 });
 }
 
-/**
- * Wait until the schedule grid exists
- */
+async function login(page, username, password) {
+  await page.goto("https://secure.timesheets.com/default.cfm?page=Login", {
+    waitUntil: "domcontentloaded",
+    timeout: 90000,
+  });
+
+  await page.locator("#username").fill(username);
+  await page.locator("#password").fill(password);
+  await saveArtifacts(page, "01-login-page");
+
+  await Promise.all([
+    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 90000 }).catch(() => {}),
+    page.locator('button.loginButton[type="submit"]').click({ timeout: 60000 }),
+  ]);
+
+  // confirm we’re in app shell
+  await page.locator("text=Dashboard").first().waitFor({ state: "visible", timeout: 60000 });
+  await saveArtifacts(page, "02-after-login");
+}
+
 async function waitForScheduleGrid(page) {
-  // These are stable “big container” anchors in your markup/screenshots
-  const grid = page.locator(".print-wrapper, .ts-schedule, .ts-schedule-table, .tsWeek").first();
-  await grid.waitFor({ state: "visible", timeout: 90000 });
+  await page.locator(".print-wrapper, .ts-schedule, .ts-schedule-table, .tsWeek").first().waitFor({
+    state: "visible",
+    timeout: 90000,
+  });
 }
 
 /**
- * After Update, the UI sometimes shows "39 / 39" and sometimes "100%".
- * Your current code was waiting ONLY for X / X, but your logs show it often sits at "100%".
- * We accept BOTH as success.
+ * IMPORTANT FIX:
+ * Sometimes Timesheets says 39/39 but only renders 1 row until you scroll
+ * or it completes a second render cycle.
+ * We require a minimum row count before scraping.
+ */
+async function ensureRowsRendered(page, minRows = 20) {
+  const rowLoc = page.locator(".schedule-row-item");
+  const scroller = page.locator(".table-off.ts-schedule-table.schedule-row-container");
+
+  const readRowCount = async () => await rowLoc.count();
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await page.waitForTimeout(1200);
+
+    let count = await readRowCount();
+    console.log(`Row count check (attempt ${attempt}): ${count}`);
+
+    if (count >= minRows) return count;
+
+    // Force virtualized rendering by scrolling the schedule container (if present)
+    if (await scroller.count()) {
+      console.log("Scrolling schedule container to force row render...");
+      await scroller.evaluate((el) => { el.scrollTop = 0; });
+      await page.waitForTimeout(600);
+      await scroller.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+      await page.waitForTimeout(1200);
+      await scroller.evaluate((el) => { el.scrollTop = 0; });
+      await page.waitForTimeout(1200);
+
+      count = await readRowCount();
+      console.log(`Row count after scroll (attempt ${attempt}): ${count}`);
+      if (count >= minRows) return count;
+    }
+
+    // If still not enough, do a single reload and re-check
+    if (attempt === 2) {
+      console.log("Row count still too low — reloading schedules page once...");
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 90000 });
+      await waitForScheduleGrid(page);
+    }
+  }
+
+  // Let it continue, but save proof
+  await saveArtifacts(page, "98-rows-too-low");
+  return await page.locator(".schedule-row-item").count();
+}
+
+/**
+ * After Update, UI sometimes shows "39 / 39" OR shows "100%".
+ * Accept both as success.
  */
 async function waitForUpdateComplete(page) {
-  const counter = page.locator("span.float-right").first(); // you gave this exact selector target
+  const counter = page.locator("span.float-right").first();
 
   const timeoutMs = 120000;
   const start = Date.now();
@@ -67,11 +128,8 @@ async function waitForUpdateComplete(page) {
     const txt = ((await counter.innerText().catch(() => "")) || "").trim();
     if (txt) lastSeen = txt;
 
-    // Good states:
-    // - "39 / 39" (or any N / N, or N / M) as long as it's not 0/0
-    // - "100%"
-    if (txt === "100%") return { ok: true, value: txt };
-    if (/^\d+\s*\/\s*\d+$/.test(txt) && txt !== "0 / 0") return { ok: true, value: txt };
+    if (txt === "100%") return txt;
+    if (/^\d+\s*\/\s*\d+$/.test(txt) && txt !== "0 / 0") return txt;
 
     await page.waitForTimeout(500);
   }
@@ -79,12 +137,7 @@ async function waitForUpdateComplete(page) {
   throw new Error(`Timed out waiting for selection counter after Update. Last seen: "${lastSeen}"`);
 }
 
-/**
- * Opens Schedules, Select All, Update, waits until done.
- * Uses the selectors YOU pasted (tour-BTS-Users, select-all, update-menu-item, etc.)
- */
 async function openSchedulesSelectAllUpdate(page) {
-  // Go straight to schedules page (no sidebar clicking needed)
   await page.goto("https://secure.timesheets.com/default.cfm?page=Schedules", {
     waitUntil: "domcontentloaded",
     timeout: 90000,
@@ -93,32 +146,29 @@ async function openSchedulesSelectAllUpdate(page) {
   await waitForScheduleGrid(page);
   await saveArtifacts(page, "03-on-schedules");
 
-  // People icon (you gave outerHTML with these classes)
   const peopleIcon = page.locator("i.open-menu.tour-BTS-Users, i.fa-users-medical-pos.open-menu").first();
   await peopleIcon.waitFor({ state: "visible", timeout: 60000 });
   await safeClick(peopleIcon);
 
-  // Select All checkbox (your selector: span.checkmark.cb-container-category.select-all)
   const selectAll = page.locator("span.checkmark.cb-container-category.select-all").first();
   await selectAll.waitFor({ state: "visible", timeout: 60000 });
   await safeClick(selectAll);
 
-  // Update button (your selector: div.menu-link-item.update-menu-item.indent-1.tour-BTS-Update)
   const updateBtn = page.locator("div.menu-link-item.update-menu-item").first();
   await updateBtn.waitFor({ state: "visible", timeout: 60000 });
   await safeClick(updateBtn);
 
-  // Wait for completion (accepts 39/39 OR 100%)
-  const done = await waitForUpdateComplete(page);
+  const status = await waitForUpdateComplete(page);
+  await waitForScheduleGrid(page);
+
+  // 🔥 NEW: make sure rows are actually rendered before scraping
+  const rows = await ensureRowsRendered(page, 20);
+  console.log(`Rows rendered after update: ${rows}`);
 
   await saveArtifacts(page, "04-after-update");
-  return done.value;
+  return status;
 }
 
-/**
- * Get the header dates in order (Sun..Sat) so we can map today's date to a column index.
- * Your markup shows .grid-day-header .date_label
- */
 async function getHeaderDates(page) {
   const labels = page.locator(".grid-day-header .date_label");
   const count = await labels.count();
@@ -126,13 +176,19 @@ async function getHeaderDates(page) {
   for (let i = 0; i < count; i++) {
     out.push(((await labels.nth(i).innerText().catch(() => "")) || "").trim());
   }
-  return out; // ["Feb 22, 2026", ...]
+  return out;
 }
 
-function ymdToDate(ymd) {
-  // ymd like 2026-02-20
+function ymdToUtcDate(ymd) {
   const [y, m, d] = ymd.split("-").map((x) => parseInt(x, 10));
   return new Date(Date.UTC(y, m - 1, d));
+}
+
+function headerLabelToUtcDate(label) {
+  const t = Date.parse(label);
+  if (Number.isNaN(t)) return null;
+  const d = new Date(t);
+  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
 }
 
 function sameUtcDay(a, b) {
@@ -143,20 +199,9 @@ function sameUtcDay(a, b) {
   );
 }
 
-function headerLabelToDate(label) {
-  // label like "Feb 25, 2026"
-  const t = Date.parse(label);
-  if (Number.isNaN(t)) return null;
-  const d = new Date(t);
-  // normalize to UTC day
-  return new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
-}
-
 /**
- * Extract time off blocks from the weekly grid using the actual grid structure:
- * - each row has the name
- * - each day cell is .grid-day[data-day-index="0..6"]
- * - time off blocks live under .timeOff and include text like "8.00 PTO" / "4.00 Sick"
+ * Read PTO blocks using the structure you posted:
+ * row -> .grid-day[data-day-index] -> .timeOff -> contains "8.00 PTO"
  */
 async function extractTimeOffFromGrid(page) {
   const rows = page.locator(".schedule-row-item .grid-row-off, .schedule-row-item .schedule_row");
@@ -170,7 +215,6 @@ async function extractTimeOffFromGrid(page) {
     const name = ((await row.locator(".name-ellipses").first().innerText().catch(() => "")) || "").trim();
     if (!name) continue;
 
-    // For each day column 0..6, check if there is a timeOff block
     for (let dayIdx = 0; dayIdx <= 6; dayIdx++) {
       const dayCell = row.locator(`.grid-day[data-day-index="${dayIdx}"]`).first();
       if (!(await dayCell.count())) continue;
@@ -180,15 +224,13 @@ async function extractTimeOffFromGrid(page) {
 
       const txt = ((await timeOffBlock.innerText().catch(() => "")) || "").replace(/\s+/g, " ").trim();
       if (!txt) continue;
-
-      // We only care about Time Off types (PTO/Sick/Time Off)
       if (!/pto|sick|time off/i.test(txt)) continue;
 
-      results.push({
-        name,
-        dayIdx,
-        raw: txt,
-      });
+      // Approved/unapproved hint: classes often include published/unpublished
+      const cls = ((await timeOffBlock.getAttribute("class").catch(() => "")) || "").toLowerCase();
+      const approved = !cls.includes("unpublished");
+
+      results.push({ name, dayIdx, raw: txt, approved });
     }
   }
 
@@ -196,97 +238,41 @@ async function extractTimeOffFromGrid(page) {
 }
 
 /**
- * LOGIN
- */
-async function login(page, username, password) {
-  await page.goto("https://secure.timesheets.com/default.cfm?page=Login", {
-    waitUntil: "domcontentloaded",
-    timeout: 90000,
-  });
-
-  await page.locator("#username").fill(username, { timeout: 60000 });
-  await page.locator("#password").fill(password, { timeout: 60000 });
-  await saveArtifacts(page, "01-login-page");
-
-  await Promise.all([
-    page.waitForNavigation({ waitUntil: "domcontentloaded", timeout: 90000 }).catch(() => {}),
-    page.locator('button.loginButton[type="submit"]').click({ timeout: 60000 }),
-  ]);
-
-  await saveArtifacts(page, "02-after-login");
-}
-
-/**
- * DAILY: return only people out on DATE_YMD (env passed by workflow)
+ * DAILY: out for a specific dateYmd
  */
 export async function scrapeWhoIsOutToday(page, opts) {
   const { tsUsername, tsPassword, dateYmd, supportTeamNames } = opts;
   const supportNames = parseSupportNames(supportTeamNames);
 
+  if (!tsUsername || !tsPassword) throw new Error("Missing Timesheets credentials in scraper call.");
+  if (!dateYmd) throw new Error("Missing dateYmd (YYYY-MM-DD).");
+  if (!supportNames.length) throw new Error("SUPPORT_TEAM_NAMES is empty.");
+
   await login(page, tsUsername, tsPassword);
 
-  // Select all + update and wait until done (39/39 OR 100%)
   const status = await openSchedulesSelectAllUpdate(page);
   console.log(`Selection status after Update: ${status}`);
 
-  await waitForScheduleGrid(page);
-
   const headerDates = await getHeaderDates(page);
-  if (!headerDates.length) {
-    await saveArtifacts(page, "99-error");
-    throw new Error("Could not find header dates (.grid-day-header .date_label).");
-  }
-
-  const target = ymdToDate(dateYmd);
-  const headerParsed = headerDates.map(headerLabelToDate);
-
+  const target = ymdToUtcDate(dateYmd);
+  const headerParsed = headerDates.map(headerLabelToUtcDate);
   const targetIdx = headerParsed.findIndex((d) => d && sameUtcDay(d, target));
+
   if (targetIdx === -1) {
-    // Not in this visible week (or header parse failed)
-    console.log("Header dates:", headerDates);
-    await saveArtifacts(page, "99-error");
+    await saveArtifacts(page, "99-target-not-in-week");
     throw new Error(`Target date ${dateYmd} not found in visible week header.`);
   }
 
   const allBlocks = await extractTimeOffFromGrid(page);
+  const dayBlocks = allBlocks.filter((b) => b.dayIdx === targetIdx);
+  const supportOnly = dayBlocks.filter((b) => isSupportName(b.name, supportNames));
 
-  // filter to the target day
-  const todayBlocks = allBlocks.filter((b) => b.dayIdx === targetIdx);
-
-  // filter support-only
-  const supportOnly = todayBlocks.filter((b) => isSupportName(b.name, supportNames));
+  await saveArtifacts(page, "06-after-scrape");
 
   return {
     dateYmd,
-    targetIdx,
     headerLabel: headerDates[targetIdx],
-    supportOnly,
-    allToday: todayBlocks,
-  };
-}
-
-/**
- * WEEKLY: return support-only time off blocks for the whole visible week
- * (Used by weekly-leads job)
- */
-export async function scrapeWhoIsOutThisWeek(page, opts) {
-  const { tsUsername, tsPassword, supportTeamNames } = opts;
-  const supportNames = parseSupportNames(supportTeamNames);
-
-  await login(page, tsUsername, tsPassword);
-
-  const status = await openSchedulesSelectAllUpdate(page);
-  console.log(`Selection status after Update: ${status}`);
-
-  await waitForScheduleGrid(page);
-
-  const headerDates = await getHeaderDates(page);
-  const allBlocks = await extractTimeOffFromGrid(page);
-
-  const supportOnly = allBlocks.filter((b) => isSupportName(b.name, supportNames));
-
-  return {
-    headerDates,
+    targetIdx,
     supportOnly,
   };
 }
