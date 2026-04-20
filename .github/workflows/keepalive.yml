@@ -1,0 +1,30 @@
+name: Repo Keepalive (prevent schedule disable)
+
+on:
+  # Run weekly so the repo is never "inactive" for 60 days
+  schedule:
+    - cron: "0 3 * * 1"  # Mondays 03:00 UTC (pick any time)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Update keepalive file
+        run: |
+          mkdir -p .keepalive
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .keepalive/last_run_utc.txt
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .keepalive/last_run_utc.txt
+          git commit -m "keepalive: $(date -u +'%Y-%m-%dT%H:%M:%SZ')" || echo "No changes to commit"
+          git push
