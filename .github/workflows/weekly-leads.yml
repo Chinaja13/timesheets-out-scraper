@@ -3,7 +3,7 @@ name: Leads Weekly (PROD)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 2 * * 1" # Sunday 7:00 PM MST (UTC-7) == Monday 02:00 UTC
+    - cron: "0 19 * * 0" # Sunday 12:00 PM MST year-round
 
 jobs:
   run:
@@ -28,11 +28,9 @@ jobs:
         env:
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
-
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID_LEADS: ${{ secrets.SLACK_CHANNEL_ID_LEADS }}
           SLACK_CHANNEL_ID_TEST: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
-
           SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
         run: npm run run:weekly
 
