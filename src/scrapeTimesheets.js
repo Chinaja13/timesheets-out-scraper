@@ -57,11 +57,43 @@ async function login(page, username, password) {
   await saveArtifacts(page, "02-after-login");
 }
 
+/**
+ * ✅ FIXED: Wait for the Schedules UI to actually finish loading.
+ * - Wait for schedule container visible
+ * - Wait for “Loading…” overlay to go away (if present)
+ * - Wait for counter to NOT be 0/0
+ */
 async function waitForScheduleGrid(page) {
   await page.locator(".print-wrapper, .ts-schedule, .ts-schedule-table, .tsWeek").first().waitFor({
     state: "visible",
-    timeout: 90000,
+    timeout: 120000,
   });
+
+  // If the spinner overlay exists, wait for it to disappear
+  const loadingText = page.locator("text=/Loading\\.\\.\\./i").first();
+  if (await loadingText.count()) {
+    await loadingText.waitFor({ state: "hidden", timeout: 120000 }).catch(() => {});
+  }
+
+  // Wait for the counter to appear and NOT be 0/0
+  const counter = page.locator("span.float-right").first();
+  const start = Date.now();
+  const timeoutMs = 120000;
+
+  while (Date.now() - start < timeoutMs) {
+    const txt = ((await counter.innerText().catch(() => "")) || "").trim();
+
+    // Sometimes it shows "100%" which is fine
+    if (txt === "100%") return;
+
+    // Sometimes it shows "39 / 39"
+    if (/^\d+\s*\/\s*\d+$/.test(txt) && txt !== "0 / 0") return;
+
+    await page.waitForTimeout(500);
+  }
+
+  // Not fatal by itself, but helps debugging
+  throw new Error("Schedules did not finish loading (counter stayed 0/0 too long).");
 }
 
 async function ensureRowsRendered(page, minRows = 20) {
@@ -105,7 +137,6 @@ async function ensureRowsRendered(page, minRows = 20) {
 
 async function waitForUpdateComplete(page) {
   const counter = page.locator("span.float-right").first();
-
   const timeoutMs = 120000;
   const start = Date.now();
   let lastSeen = "";
@@ -145,6 +176,8 @@ async function openSchedulesSelectAllUpdate(page) {
   await safeClick(updateBtn);
 
   const status = await waitForUpdateComplete(page);
+
+  // After update, wait again for UI hydration
   await waitForScheduleGrid(page);
 
   const rows = await ensureRowsRendered(page, 20);
@@ -161,7 +194,7 @@ async function getHeaderDates(page) {
   for (let i = 0; i < count; i++) {
     out.push(((await labels.nth(i).innerText().catch(() => "")) || "").trim());
   }
-  return out; // index aligns to data-day-index
+  return out;
 }
 
 function ymdToUtcDate(ymd) {
@@ -186,26 +219,19 @@ function sameUtcDay(a, b) {
 
 function parseHoursAndType(raw) {
   const txt = (raw || "").replace(/\s+/g, " ").trim();
-
-  // Expect “8.00 PTO”, “4.00 Sick”, etc.
   const m = txt.match(/(\d+(?:\.\d+)?)\s*(PTO|Sick|Time Off|Unavailable)/i);
   const hours = m ? Number(m[1]) : null;
   const type = m ? m[2].toUpperCase() : "TIME OFF";
 
-  // Normalize type labels
   let t = type;
-  if (t === "TIME OFF") t = "TIME OFF";
   if (t === "UNAVAILABLE") t = "TIME OFF";
+  if (t === "TIME OFF") t = "TIME OFF";
   if (t === "SICK") t = "SICK";
   if (t === "PTO") t = "PTO";
 
   return { hours, type: t, raw: txt };
 }
 
-/**
- * Extract ALL time off blocks from the weekly grid:
- * row -> .grid-day[data-day-index] -> blocks inside
- */
 async function extractTimeOffFromGrid(page) {
   const rows = page.locator(".schedule-row-item .grid-row-off, .schedule-row-item .schedule_row");
   const rowCount = await rows.count();
