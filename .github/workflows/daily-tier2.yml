@@ -8,7 +8,7 @@ on:
         required: false
         default: ""
   schedule:
-    - cron: "0 12 * * 1-5" # 5:00 AM MST (UTC-7) Mon-Fri
+    - cron: "0 13 * * 1-5" # 6:00 AM MST year-round
 
 jobs:
   run:
@@ -32,14 +32,11 @@ jobs:
       - name: Run Tier2 daily
         env:
           DATE_YMD: ${{ inputs.date_ymd }}
-
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
-
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
           SLACK_CHANNEL_ID_TIER2: ${{ secrets.SLACK_CHANNEL_ID_TIER2 }}
           SLACK_CHANNEL_ID_TEST: ${{ secrets.SLACK_CHANNEL_ID_TEST }}
-
           SUPPORT_TEAM_NAMES: ${{ secrets.SUPPORT_TEAM_NAMES }}
         run: npm run run:daily
 
