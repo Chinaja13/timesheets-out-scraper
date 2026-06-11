@@ -58,42 +58,74 @@ async function login(page, username, password) {
 }
 
 /**
- * ✅ FIXED: Wait for the Schedules UI to actually finish loading.
- * - Wait for schedule container visible
- * - Wait for “Loading…” overlay to go away (if present)
- * - Wait for counter to NOT be 0/0
+ * ✅ Robust “Schedules is ready” check.
+ * We DO NOT rely solely on the counter anymore.
+ * Ready if ANY are true:
+ *  - counter is 100% or X/Y (not 0/0)
+ *  - header date labels exist (>=5)
+ *  - rows exist (>=1)
+ *
+ * If spinner overlay lingers, we keep waiting, then do ONE hard reload.
  */
-async function waitForScheduleGrid(page) {
-  await page.locator(".print-wrapper, .ts-schedule, .ts-schedule-table, .tsWeek").first().waitFor({
-    state: "visible",
-    timeout: 120000,
-  });
+async function waitForScheduleReady(page) {
+  const container = page.locator(".print-wrapper, .ts-schedule, .ts-schedule-table, .tsWeek").first();
+  await container.waitFor({ state: "visible", timeout: 120000 });
 
-  // If the spinner overlay exists, wait for it to disappear
+  const counter = page.locator("span.float-right").first();
+  const headerLabels = page.locator(".grid-day-header .date_label");
+  const rows = page.locator(".schedule-row-item");
   const loadingText = page.locator("text=/Loading\\.\\.\\./i").first();
-  if (await loadingText.count()) {
-    await loadingText.waitFor({ state: "hidden", timeout: 120000 }).catch(() => {});
+
+  async function isReady() {
+    // 1) Counter condition
+    const txt = ((await counter.innerText().catch(() => "")) || "").trim();
+    if (txt === "100%") return true;
+    if (/^\d+\s*\/\s*\d+$/.test(txt) && txt !== "0 / 0") return true;
+
+    // 2) Header dates exist
+    const hc = await headerLabels.count().catch(() => 0);
+    if (hc >= 5) return true;
+
+    // 3) Rows exist
+    const rc = await rows.count().catch(() => 0);
+    if (rc >= 1) return true;
+
+    return false;
   }
 
-  // Wait for the counter to appear and NOT be 0/0
-  const counter = page.locator("span.float-right").first();
-  const start = Date.now();
   const timeoutMs = 120000;
+  const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
-    const txt = ((await counter.innerText().catch(() => "")) || "").trim();
+    // If ready, return
+    if (await isReady()) return;
 
-    // Sometimes it shows "100%" which is fine
-    if (txt === "100%") return;
+    // If loading overlay exists/visible, just wait a bit (don’t fail early)
+    const loadingVisible = (await loadingText.count().catch(() => 0)) > 0
+      ? await loadingText.isVisible().catch(() => false)
+      : false;
 
-    // Sometimes it shows "39 / 39"
-    if (/^\d+\s*\/\s*\d+$/.test(txt) && txt !== "0 / 0") return;
-
-    await page.waitForTimeout(500);
+    if (loadingVisible) {
+      await page.waitForTimeout(800);
+    } else {
+      await page.waitForTimeout(400);
+    }
   }
 
-  // Not fatal by itself, but helps debugging
-  throw new Error("Schedules did not finish loading (counter stayed 0/0 too long).");
+  // One recovery attempt: hard reload schedules once
+  console.log("Schedules still not ready — reloading schedules page once...");
+  await page.reload({ waitUntil: "domcontentloaded", timeout: 90000 });
+  await container.waitFor({ state: "visible", timeout: 120000 });
+
+  // Wait a shorter second window
+  const start2 = Date.now();
+  const timeout2 = 60000;
+  while (Date.now() - start2 < timeout2) {
+    if (await isReady()) return;
+    await page.waitForTimeout(600);
+  }
+
+  throw new Error("Schedules did not finish loading (counter stayed 0/0 and headers/rows never appeared).");
 }
 
 async function ensureRowsRendered(page, minRows = 20) {
@@ -103,17 +135,16 @@ async function ensureRowsRendered(page, minRows = 20) {
   const readRowCount = async () => await rowLoc.count();
 
   for (let attempt = 1; attempt <= 3; attempt++) {
-    await page.waitForTimeout(1200);
+    await page.waitForTimeout(1000);
 
     let count = await readRowCount();
     console.log(`Row count check (attempt ${attempt}): ${count}`);
-
     if (count >= minRows) return count;
 
     if (await scroller.count()) {
       console.log("Scrolling schedule container to force row render...");
       await scroller.evaluate((el) => { el.scrollTop = 0; });
-      await page.waitForTimeout(600);
+      await page.waitForTimeout(500);
       await scroller.evaluate((el) => { el.scrollTop = el.scrollHeight; });
       await page.waitForTimeout(1200);
       await scroller.evaluate((el) => { el.scrollTop = 0; });
@@ -127,7 +158,7 @@ async function ensureRowsRendered(page, minRows = 20) {
     if (attempt === 2) {
       console.log("Row count still too low — reloading schedules page once...");
       await page.reload({ waitUntil: "domcontentloaded", timeout: 90000 });
-      await waitForScheduleGrid(page);
+      await waitForScheduleReady(page);
     }
   }
 
@@ -160,7 +191,7 @@ async function openSchedulesSelectAllUpdate(page) {
     timeout: 90000,
   });
 
-  await waitForScheduleGrid(page);
+  await waitForScheduleReady(page);
   await saveArtifacts(page, "03-on-schedules");
 
   const peopleIcon = page.locator("i.open-menu.tour-BTS-Users, i.fa-users-medical-pos.open-menu").first();
@@ -177,8 +208,8 @@ async function openSchedulesSelectAllUpdate(page) {
 
   const status = await waitForUpdateComplete(page);
 
-  // After update, wait again for UI hydration
-  await waitForScheduleGrid(page);
+  // after update, wait for schedule to re-hydrate
+  await waitForScheduleReady(page);
 
   const rows = await ensureRowsRendered(page, 20);
   console.log(`Rows rendered after update: ${rows}`);
