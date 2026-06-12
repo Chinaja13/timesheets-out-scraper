@@ -8,7 +8,7 @@ on:
         required: false
         default: ""
   schedule:
-    - cron: "0 13 * * 1-5" # 6:00 AM MST year-round
+    - cron: "7 13 * * 1-5" # 6:07 AM MST year-round
 
 jobs:
   run:
@@ -31,7 +31,7 @@ jobs:
 
       - name: Run Tier2 daily
         env:
-          DATE_YMD: ${{ inputs.date_ymd }}
+          DATE_YMD: ${{ github.event.inputs.date_ymd || '' }}
           TS_USERNAME: ${{ secrets.TS_USERNAME }}
           TS_PASSWORD: ${{ secrets.TS_PASSWORD }}
           SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
