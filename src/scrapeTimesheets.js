@@ -17,20 +17,51 @@ async function saveArtifacts(page, name) {
 }
 
 function norm(s) {
-  return (s || "").replace(/\s+/g, " ").trim().toLowerCase();
+  return (s || "")
+    .replace(/,/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function nameTokens(s) {
+  return norm(s)
+    .split(" ")
+    .map((x) => x.trim())
+    .filter(Boolean);
 }
 
 function parseSupportNames(envVal) {
   const s = envVal == null ? "" : String(envVal);
+
+  // Split only on new lines, not commas.
+  // This keeps names like "Penman, Shaun" together.
   return s
-    .split(/[\n,]/g)
+    .split(/\n/g)
     .map((x) => norm(x))
     .filter(Boolean);
 }
 
 function isSupportName(fullName, supportNames) {
-  const n = norm(fullName);
-  return supportNames.some((sn) => n === sn || n.includes(sn));
+  const rowName = norm(fullName);
+  const rowTokens = nameTokens(rowName);
+
+  return supportNames.some((supportName) => {
+    const sn = norm(supportName);
+    const supportTokens = nameTokens(sn);
+
+    if (!sn || !supportTokens.length) return false;
+
+    // Exact normalized match
+    if (rowName === sn) return true;
+
+    // Old behavior
+    if (rowName.includes(sn)) return true;
+
+    // New behavior:
+    // "Shaun Penman" matches "Penman Shaun" or "Penman, Shaun"
+    return supportTokens.every((tok) => rowTokens.includes(tok));
+  });
 }
 
 async function safeClick(locator) {
